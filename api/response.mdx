@@ -1,0 +1,180 @@
+---
+title: Response
+description: The struct that represents an HTTP response, including status, headers, and body.
+---
+
+`Response` holds the status code, headers, and body for an HTTP response. It is a value type returned from route handlers and middleware.
+
+```swift
+public struct Response: Sendable
+```
+
+---
+
+## Properties
+
+<ResponseField name="status" type="HTTPResponse.Status">
+  The HTTP response status code, for example `.ok` (200), `.notFound` (404), or `.internalServerError` (500).
+</ResponseField>
+
+<ResponseField name="headers" type="HTTPFields">
+  The response headers. Setting `body` automatically updates the `Content-Length` header when the body has a known content length.
+</ResponseField>
+
+<ResponseField name="body" type="ResponseBody">
+  The response body. See [ResponseBody](/api/response-body) for details. Setting `body` synchronizes the `Content-Length` header automatically.
+</ResponseField>
+
+<ResponseField name="head" type="HTTPResponse">
+  Computed property that constructs an `HTTPResponse` from `status` and `headers`. Setting it updates both `status` and `headers`.
+</ResponseField>
+
+---
+
+## Initializer
+
+```swift
+public init(
+    status: HTTPResponse.Status,
+    headers: HTTPFields = .init(),
+    body: ResponseBody = .init()
+)
+```
+
+<ParamField path="status" type="HTTPResponse.Status" required>
+  The HTTP status code.
+</ParamField>
+
+<ParamField path="headers" type="HTTPFields" default=".init()">
+  Response headers. If `body` has a known `contentLength` and `headers` does not already include `Content-Length`, it is added automatically.
+</ParamField>
+
+<ParamField path="body" type="ResponseBody" default=".init()">
+  The response body. An empty body is the default.
+</ParamField>
+
+---
+
+## redirect(to:type:)
+
+Creates a redirect response. This is a static factory method on `Response`.
+
+```swift
+public static func redirect(
+    to location: String,
+    type: RedirectType = .normal
+) -> Response
+```
+
+<ParamField path="location" type="String" required>
+  The URL or path to redirect to. Set as the `Location` header.
+</ParamField>
+
+<ParamField path="type" type="RedirectType" default=".normal">
+  The redirect semantics. See [RedirectType](#redirecttype) below.
+</ParamField>
+
+### RedirectType
+
+```swift
+public enum RedirectType: Sendable {
+    case permanent  // 301 Moved Permanently
+    case found      // 302 Found
+    case normal     // 303 See Other
+    case temporary  // 307 Temporary Redirect
+}
+```
+
+<ResponseField name="permanent" type="case">
+  `301 Moved Permanently`. The resource has moved to the new URL.
+</ResponseField>
+
+<ResponseField name="found" type="case">
+  `302 Found`. The resource is temporarily at a different URL.
+</ResponseField>
+
+<ResponseField name="normal" type="case">
+  `303 See Other`. Directs the client to GET the resource at the new URL, regardless of the original method.
+</ResponseField>
+
+<ResponseField name="temporary" type="case">
+  `307 Temporary Redirect`. The client must repeat the request with the same method at the new URL.
+</ResponseField>
+
+---
+
+## createHeadResponse()
+
+Returns a copy of the response with an empty body, suitable for responding to `HEAD` requests.
+
+```swift
+public func createHeadResponse() -> Response
+```
+
+---
+
+## ResponseGenerator protocol
+
+Route handlers can return any type conforming to `ResponseGenerator` rather than a `Response` directly. The router calls `response(from:context:)` to convert the value.
+
+```swift
+public protocol ResponseGenerator {
+    func response(from request: Request, context: some RequestContext) throws -> Response
+}
+```
+
+The following types conform out of the box:
+
+| Type | Behavior |
+|---|---|
+| `Response` | Returns itself. |
+| `String` | `200 OK` with `text/plain; charset=utf-8` body. |
+| `Substring` | `200 OK` with `text/plain; charset=utf-8` body. |
+| `ByteBuffer` | `200 OK` with `application/octet-stream` body. |
+| `HTTPResponse.Status` | Response with that status code and an empty body. |
+| `Optional<T: ResponseGenerator>` | Returns the wrapped response or `204 No Content` for `nil`. |
+
+### EditedResponse
+
+`EditedResponse<Generator>` wraps another `ResponseGenerator` and lets you override the status code and merge additional headers without re-implementing the generator.
+
+```swift
+public struct EditedResponse<Generator: ResponseGenerator>: ResponseGenerator {
+    public init(
+        status: HTTPResponse.Status? = nil,
+        headers: HTTPFields = .init(),
+        response: Generator
+    )
+}
+```
+
+Headers from `EditedResponse` take precedence; headers from the underlying generator are included only if not already present.
+
+---
+
+## Examples
+
+```swift
+// Plain status code
+router.delete("items/:id") { _, _ in
+    HTTPResponse.Status.noContent
+}
+
+// Redirect
+router.get("old-path") { _, _ in
+    Response.redirect(to: "/new-path", type: .permanent)
+}
+
+// Full response with headers
+router.get("download") { _, _ in
+    let data = ByteBuffer(string: "file contents")
+    return Response(
+        status: .ok,
+        headers: [
+            .contentType: "application/octet-stream",
+            .contentDisposition: "attachment; filename=\"file.txt\""
+        ],
+        body: .init(byteBuffer: data)
+    )
+}
+```

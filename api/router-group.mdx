@@ -1,0 +1,227 @@
+---
+title: RouterGroup
+description: Groups routes under a shared path prefix and scopes middleware to those routes.
+---
+
+`RouterGroup<Context>` applies a path prefix to every route registered inside it and lets you scope middleware to only those routes. Groups are returned by `RouterMethods.group(_:)` and can be nested arbitrarily deep.
+
+```swift
+@available(macOS 14, iOS 17, tvOS 17, *)
+public struct RouterGroup<Context: RequestContext>: RouterMethods
+```
+
+---
+
+## Creating a group
+
+Call `group(_:)` on any `RouterMethods`-conforming type (a `Router` or another `RouterGroup`) to create a new group:
+
+```swift
+let router = Router()
+
+router.group("todos")
+    .get(use: todoController.list)
+    .post(use: todoController.create)
+    .get(":id", use: todoController.get)
+    .put(":id", use: todoController.update)
+    .delete(":id", use: todoController.delete)
+```
+
+All routes registered on the group prepend the group path. `.get(":id")` above resolves to `GET /todos/:id`.
+
+<Note>
+  `RouterGroup` is a value type. Chaining is idiomatic. Holding a reference and adding routes to it later works because it shares the parent router's trie through a reference-typed parent.
+</Note>
+
+---
+
+## group(_:)
+
+```swift
+public func group(_ path: RouterPath = "") -> RouterGroup<Context>
+```
+
+<ParamField path="path" type="RouterPath" default='""'>
+  Path prefix added to all routes in the group. Accepts the same syntax as individual routes: fixed segments, `:parameter`, `*`, and `**`. An empty string creates a group that scopes middleware without adding a prefix.
+</ParamField>
+
+---
+
+## Context-transforming groups
+
+### group(_:context:) — InitializableFromSource
+
+Creates a group whose routes use a different `RequestContext` type. The target context must declare `Source == CurrentContext`:
+
+```swift
+struct AdminContext: RequestContext {
+    typealias Source = BasicRequestContext
+    var coreContext: CoreRequestContextStorage
+    init(source: Source) {
+        self.coreContext = .init(source: source)
+    }
+}
+
+router.group("admin", context: AdminContext.self)
+    .get("dashboard") { _, context -> String in
+        return "Admin dashboard"
+    }
+```
+
+```swift
+public func group<TargetContext>(
+    _ path: RouterPath = "",
+    context: TargetContext.Type
+) -> RouterGroup<TargetContext> where TargetContext.Source == Context
+```
+
+<ParamField path="path" type="RouterPath" default='""'>
+  Path prefix for this group.
+</ParamField>
+
+<ParamField path="context" type="TargetContext.Type" required>
+  The new context type. Must have `Source == Context` (the current group's context type).
+</ParamField>
+
+---
+
+### group(_:context:) — ChildRequestContext
+
+Creates a group for contexts that conform to `ChildRequestContext`. The parent context is set via the `ParentContext` associated type and the initializer may throw:
+
+```swift
+struct AuthContext: ChildRequestContext {
+    typealias ParentContext = BasicRequestContext
+    var coreContext: CoreRequestContextStorage
+    let user: User
+
+    init(context: ParentContext) throws {
+        guard let user = context.identity else { throw HTTPError(.unauthorized) }
+        self.user = user
+        self.coreContext = .init(source: context)
+    }
+}
+
+router.group("protected", context: AuthContext.self)
+    .get("profile") { _, context -> User in
+        return context.user
+    }
+```
+
+```swift
+public func group<TargetContext: ChildRequestContext>(
+    _ path: RouterPath = "",
+    context: TargetContext.Type
+) -> RouterGroup<TargetContext> where TargetContext.ParentContext == Context
+```
+
+<ParamField path="path" type="RouterPath" default='""'>
+  Path prefix for this group.
+</ParamField>
+
+<ParamField path="context" type="TargetContext.Type" required>
+  A `ChildRequestContext` type whose `ParentContext` matches the current group's `Context`.
+</ParamField>
+
+---
+
+## add(middleware:)
+
+Adds middleware scoped to this group. Only routes registered on the group **after** this call receive the middleware.
+
+```swift
+@discardableResult
+public func add(
+    middleware: any MiddlewareProtocol<Request, Response, Context>
+) -> RouterGroup<Context>
+```
+
+<ParamField path="middleware" type="any MiddlewareProtocol<Request, Response, Context>" required>
+  The middleware to add. Applied in registration order, after any middleware on parent routers.
+</ParamField>
+
+```swift
+router.group("api")
+    .add(middleware: AuthMiddleware())
+    .get("me") { _, context in context.user }
+    .post("logout") { _, _ in HTTPResponse.Status.ok }
+```
+
+---
+
+## addMiddleware {} result builder
+
+Adds multiple middleware using the `MiddlewareFixedTypeBuilder` result builder:
+
+```swift
+router.group("api")
+    .addMiddleware {
+        AuthMiddleware()
+        RateLimitMiddleware(requestsPerMinute: 60)
+    }
+    .get("me") { _, context in context.user }
+```
+
+---
+
+## All RouterMethods available on groups
+
+Because `RouterGroup` conforms to `RouterMethods`, every HTTP verb method is available:
+
+| Method | HTTP verb |
+|---|---|
+| `get(_:use:)` | GET |
+| `post(_:use:)` | POST |
+| `put(_:use:)` | PUT |
+| `delete(_:use:)` | DELETE |
+| `patch(_:use:)` | PATCH |
+| `head(_:use:)` | HEAD |
+| `on(_:method:use:)` | Any method |
+
+See [RouterMethods](/api/router-methods) for full signatures.
+
+---
+
+## Nesting groups
+
+Groups can be nested to build hierarchical route trees:
+
+```swift
+let router = Router()
+
+let api = router.group("api")
+
+let v1 = api.group("v1")
+v1.get("status") { _, _ in "v1 ok" }
+
+let v2 = api.group("v2")
+v2.get("status") { _, _ in "v2 ok" }
+
+// Results in:
+//   GET /api/v1/status
+//   GET /api/v2/status
+```
+
+---
+
+## Middleware scoping
+
+Middleware added to a group applies only to routes in that group. Parent middleware still applies.
+
+```swift
+let router = Router()
+
+// Applies to all routes
+router.addMiddleware {
+    LogRequestsMiddleware(.info)
+}
+
+// Applies only to /admin/** routes
+router.group("admin")
+    .add(middleware: AdminAuthMiddleware())
+    .get("users") { _, _ in /* ... */ }
+    .delete("users/:id") { _, _ in /* ... */ }
+
+// No auth middleware here
+router.get("health") { _, _ in "ok" }
+```

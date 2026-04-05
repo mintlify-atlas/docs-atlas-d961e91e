@@ -1,0 +1,240 @@
+---
+title: "Request and response"
+description: "Understand the Request and Response types in Hummingbird, including bodies, headers, URI parsing, and cookies."
+---
+
+Every route handler receives a `Request` and must produce something conforming to `ResponseGenerator`. The framework converts that into a `Response` and writes it back to the client.
+
+## Request
+
+`Request` is a value type (`struct`) that holds everything about an incoming HTTP request:
+
+```swift
+public struct Request: Sendable {
+    /// Parsed URI (path, query, scheme, host)
+    public let uri: URI
+    /// Raw HTTP head from swift-http-types
+    public let head: HTTPRequest
+    /// HTTP method — shorthand for head.method
+    public var method: HTTPRequest.Method { self.head.method }
+    /// HTTP headers — shorthand for head.headerFields
+    public var headers: HTTPFields { self.head.headerFields }
+    /// Streaming or buffered request body
+    public var body: RequestBody
+}
+```
+
+### Accessing common fields
+
+```swift
+router.post("echo") { request, context in
+    let method  = request.method          // e.g. HTTPRequest.Method.post
+    let path    = request.uri.path        // e.g. "/echo"
+    let agent   = request.headers[.userAgent]
+    let body    = try await request.body.collect(upTo: 1024 * 1024)
+    return String(buffer: body)
+}
+```
+
+## URI
+
+`URI` is a lightweight parser for the request URL:
+
+```swift
+public struct URI: Sendable {
+    public var scheme: Scheme?      // .http, .https, .ws, …
+    public var host: String?
+    public var port: Int?
+    public var path: String         // always present; defaults to "/"
+    public var query: String?       // raw query string
+    public var queryParameters: FlatDictionary<Substring, Substring>
+}
+```
+
+```swift
+router.get("search") { request, _ in
+    let query   = request.uri.query                         // "q=swift&page=2"
+    let term    = request.uri.queryParameters["q"]          // "swift"
+    let page    = request.uri.queryParameters["page"]       // "2"
+    return "Searching for \(term ?? "")"
+}
+```
+
+`queryParameters` returns a `FlatDictionary` whose values are percent-decoded `Substring`s.
+
+## RequestBody
+
+`RequestBody` conforms to `AsyncSequence<ByteBuffer>`. You can consume it in two ways:
+
+<Tabs>
+  <Tab title="Collect into a single ByteBuffer">
+    ```swift
+    router.post("upload") { request, _ in
+        // Collects all chunks; throws if body exceeds maxSize
+        let buffer = try await request.body.collect(upTo: 5 * 1024 * 1024)
+        let text = String(buffer: buffer)
+        return "Received \(buffer.readableBytes) bytes"
+    }
+    ```
+
+    You can also store the collated body back onto the request (useful in middleware):
+
+    ```swift
+    let buffer = try await request.collectBody(upTo: 1024 * 1024)
+    ```
+  </Tab>
+  <Tab title="Stream chunks">
+    ```swift
+    router.post("stream") { request, _ in
+        var total = 0
+        for try await chunk in request.body {
+            total += chunk.readableBytes
+        }
+        return "Received \(total) bytes in total"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>`RequestBody` is a unicast sequence — you can only iterate it once. Calling `collect` or iterating it a second time returns nothing.</Warning>
+
+## Response
+
+`Response` is the value you ultimately send back to the client:
+
+```swift
+public struct Response: Sendable {
+    public var status: HTTPResponse.Status
+    public var headers: HTTPFields
+    public var body: ResponseBody
+}
+```
+
+Construct one directly when you need full control:
+
+```swift
+Response(
+    status: .created,
+    headers: [.contentType: "application/json"],
+    body: .init(byteBuffer: ByteBuffer(string: #"{"id":1}"#))
+)
+```
+
+Setting `body` automatically updates the `Content-Length` header when the body has a known length.
+
+## ResponseBody
+
+`ResponseBody` is a write-once wrapper that accepts a closure, a `ByteBuffer`, a sequence of `ByteBuffer`s, or an `AsyncSequence`:
+
+```swift
+// Empty body
+let empty = ResponseBody()
+
+// Single ByteBuffer
+let fixed = ResponseBody(byteBuffer: ByteBuffer(string: "Hello"))
+
+// Sequence of ByteBuffers
+let chunked = ResponseBody(contentsOf: [chunk1, chunk2])
+
+// AsyncSequence (streaming)
+let streamed = ResponseBody(asyncSequence: myAsyncByteBufferStream)
+
+// Custom writer closure
+let custom = ResponseBody(contentLength: 5) { writer in
+    try await writer.write(ByteBuffer(string: "Hello"))
+    try await writer.finish(nil)
+}
+```
+
+## HTTPFields for headers
+
+Hummingbird uses `HTTPFields` from [swift-http-types](https://github.com/apple/swift-http-types). Access headers with typed `HTTPField.Name` constants:
+
+```swift
+// Reading
+let contentType = request.headers[.contentType]
+let auth        = request.headers[.authorization]
+
+// Writing
+var response = Response(status: .ok)
+response.headers[.contentType] = "application/json"
+response.headers[.cacheControl] = "no-store"
+
+// Appending multiple values for the same header name
+response.headers[values: .setCookie].append("session=abc; HttpOnly")
+response.headers[values: .setCookie].append("tracking=xyz")
+```
+
+## ResponseGenerator
+
+`ResponseGenerator` is the protocol route handlers return. The router calls `response(from:context:)` to convert the handler's return value into a `Response`:
+
+```swift
+public protocol ResponseGenerator {
+    func response(from request: Request, context: some RequestContext) throws -> Response
+}
+```
+
+Built-in conformances:
+
+| Type | Status | Content-Type |
+|---|---|---|
+| `String` | 200 OK | `text/plain; charset=utf-8` |
+| `Substring` | 200 OK | `text/plain; charset=utf-8` |
+| `ByteBuffer` | 200 OK | `application/octet-stream` |
+| `HTTPResponse.Status` | that status | empty body |
+| `Response` | passthrough | as set |
+| `Optional<T: ResponseGenerator>` | 204 No Content when `nil` | — |
+
+```swift
+router.get("text")   { _, _ -> String              in "Hello" }
+router.get("status") { _, _ -> HTTPResponse.Status  in .accepted }
+router.get("bytes")  { _, _ -> ByteBuffer           in ByteBuffer(string: "raw") }
+router.get("full")   { _, _ -> Response             in Response(status: .ok) }
+router.get("maybe")  { _, _ -> String?              in nil }  // 204
+```
+
+### EditedResponse
+
+`EditedResponse` lets you override the status or add headers to any `ResponseGenerator` without replacing it entirely:
+
+```swift
+router.get("wrapped") { _, _ in
+    EditedResponse(
+        status: .accepted,
+        headers: [.cacheControl: "no-store"],
+        response: "body text"
+    )
+}
+```
+
+## Cookies
+
+### Reading cookies from a request
+
+```swift
+router.get("greet") { request, _ in
+    let cookies = request.cookies          // Cookies struct
+    let session = cookies["session"]       // Cookie? by name
+    return "session value: \(session?.value ?? "none")"
+}
+```
+
+### Setting cookies on a response
+
+```swift
+router.post("login") { request, _ in
+    var response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "logged in")))
+    let cookie = Cookie(
+            name: "session",
+            value: "abc123",
+            path: "/",
+            httpOnly: true,
+            secure: true
+        )
+        response.setCookie(cookie)
+    return response
+}
+```
+
+`Cookie` supports the RFC 6265 attributes: `expires`, `maxAge`, `domain`, `path`, `secure`, and `httpOnly`. To also set `sameSite`, use the `Cookie.validated(name:value:...)` static method, which also throws a validation error instead of asserting when the name or value contains invalid characters.

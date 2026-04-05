@@ -1,80 +1,211 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Go from an empty directory to a running Hummingbird HTTP server in under five minutes.
 ---
 
-## Get started in three steps
+This guide walks you through creating a new Swift package, adding Hummingbird as a dependency, writing a simple HTTP server, and verifying it works with `curl`.
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
+## Prerequisites
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Swift 5.10 or later" icon="swift">
+    Download Swift from [swift.org/install](https://www.swift.org/install/). Run `swift --version` to confirm.
+  </Card>
+  <Card title="macOS 14+ or Linux" icon="terminal">
+    Hummingbird supports macOS 14+, iOS 17+, and any Swift-supported Linux distribution.
+  </Card>
 </CardGroup>
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  On macOS, Xcode 15 or later ships with a compatible Swift toolchain. On Linux, use the official Swift toolchain from [swift.org](https://www.swift.org/install/).
 </Note>
+
+## Build your first server
+
+<Steps>
+
+<Step title="Create a new Swift package">
+
+Create an executable Swift package in a new directory:
+
+```bash
+mkdir HelloServer && cd HelloServer
+swift package init --type executable
+```
+
+This produces the following layout:
+
+```
+HelloServer/
+├── Package.swift
+└── Sources/
+    └── main.swift
+```
+
+</Step>
+
+<Step title="Add Hummingbird to Package.swift">
+
+Open `Package.swift` and replace its contents with the following:
+
+```swift Package.swift
+// swift-tools-version:5.10
+import PackageDescription
+
+let package = Package(
+    name: "HelloServer",
+    platforms: [.macOS(.v14)],
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "HelloServer",
+            dependencies: [
+                .product(name: "Hummingbird", package: "hummingbird"),
+            ]
+        ),
+    ]
+)
+```
+
+<Tip>
+  You can add the dependency from the command line without editing `Package.swift` manually. Replace `HelloServer` with the name of your target:
+
+  ```bash
+  swift package add-dependency https://github.com/hummingbird-project/hummingbird.git --from 2.0.0
+  swift package add-target-dependency Hummingbird HelloServer --package hummingbird
+  ```
+</Tip>
+
+</Step>
+
+<Step title="Write the server">
+
+Replace the contents of `Sources/main.swift` with:
+
+```swift Sources/main.swift
+import Hummingbird
+
+// Create a router and register a GET /hello route
+let router = Router()
+router.get("hello") { request, _ -> String in
+    return "Hello, world!"
+}
+
+// Create the application with the router and bind address
+let app = Application(
+    router: router,
+    configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+)
+
+// Run the server — gracefully shuts down on SIGINT/SIGTERM
+try await app.runService()
+```
+
+`Application` conforms to `Service` from swift-service-lifecycle. `runService()` wraps the app in a `ServiceGroup` that listens for `SIGINT` and `SIGTERM` and performs a clean shutdown when either signal is received.
+
+</Step>
+
+<Step title="Add a route with a path parameter">
+
+Route parameters are declared with a `:` prefix in the path pattern. The router extracts the matched segment and makes it available through `context.parameters`.
+
+Add the following route below the `router.get("hello")` call:
+
+```swift
+router.get("hello/:name") { request, context -> String in
+    // require() throws HTTPError(.badRequest) if the parameter is missing
+    let name = try context.parameters.require("name")
+    return "Hello, \(name)!"
+}
+```
+
+Your full `main.swift` should now look like this:
+
+```swift Sources/main.swift
+import Hummingbird
+
+let router = Router()
+
+router.get("hello") { request, _ -> String in
+    return "Hello, world!"
+}
+
+router.get("hello/:name") { request, context -> String in
+    let name = try context.parameters.require("name")
+    return "Hello, \(name)!"
+}
+
+let app = Application(
+    router: router,
+    configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+)
+try await app.runService()
+```
+
+<Info>
+  `context.parameters.require(_:)` returns the parameter as a `String` and throws an `HTTPError(.badRequest)` if the key is absent. Use `context.parameters.get(_:)` if you prefer an optional return value instead of a thrown error.
+</Info>
+
+</Step>
+
+<Step title="Run the server">
+
+Start the server with:
+
+```bash
+swift run
+```
+
+Swift will resolve and compile dependencies on the first run, which takes a moment. Once the server is ready you will see log output similar to:
+
+```
+info Hummingbird : Server started and listening on 127.0.0.1:8080
+```
+
+</Step>
+
+<Step title="Test with curl">
+
+Open a second terminal and send requests to both routes:
+
+```bash
+curl http://127.0.0.1:8080/hello
+```
+
+```
+Hello, world!
+```
+
+```bash
+curl http://127.0.0.1:8080/hello/Swift
+```
+
+```
+Hello, Swift!
+```
+
+Press `Ctrl+C` in the server terminal to stop the process. Hummingbird handles `SIGINT` and drains in-flight requests before exiting.
+
+</Step>
+
+</Steps>
+
+## What you built
+
+| Route | Handler | Response |
+|---|---|---|
+| `GET /hello` | Returns a static string | `Hello, world!` |
+| `GET /hello/:name` | Reads the `:name` parameter | `Hello, <name>!` |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="package" href="/installation">
+    Learn about all available library targets and how to add optional features like TLS and HTTP/2.
+  </Card>
+  <Card title="Introduction" icon="book" href="/introduction">
+    Read a deeper overview of Hummingbird's architecture and design principles.
+  </Card>
+</CardGroup>

@@ -1,0 +1,138 @@
+---
+title: TracingMiddleware
+description: Middleware that creates a distributed tracing span for every HTTP request using Swift Distributed Tracing.
+---
+
+`TracingMiddleware<Context>` creates a server-side span for each request using [Swift Distributed Tracing](https://github.com/apple/swift-distributed-tracing). It populates the span with standard HTTP semantic attributes and propagates trace context from incoming request headers.
+
+```swift
+@available(macOS 14, iOS 17, tvOS 17, *)
+public struct TracingMiddleware<Context: RequestContext>: RouterMiddleware
+```
+
+Swift Distributed Tracing is backend-agnostic. You must initialize a tracing backend (such as [OTLP](https://github.com/slashmo/swift-otel) or [Zipkin](https://github.com/slashmo/swift-tracing)) before any spans are recorded.
+
+---
+
+## Initializers
+
+### init(recordingHeaders:attributes:)
+
+```swift
+public init(
+    recordingHeaders headerNamesToRecord: some Collection<HTTPField.Name> = [],
+    attributes: SpanAttributes? = nil
+)
+```
+
+<ParamField path="recordingHeaders" type="some Collection<HTTPField.Name>" default="[]">
+  HTTP header names to capture as span attributes. Request headers are stored under `http.request.header.<name>` and response headers under `http.response.header.<name>`. Header names are normalized: hyphens are replaced with underscores. No headers are recorded by default.
+</ParamField>
+
+<ParamField path="attributes" type="SpanAttributes?" default="nil">
+  Static attributes added to every span. Use these for fixed metadata such as `net.host.name`, `net.host.port`, or `url.scheme`.
+</ParamField>
+
+### init(recordingHeaders:redactingQueryParameters:attributes:)
+
+```swift
+public init(
+    recordingHeaders headerNamesToRecord: some Collection<HTTPField.Name> = [],
+    redactingQueryParameters queryParametersToRedact: Set<String> = [],
+    attributes: SpanAttributes? = nil
+)
+```
+
+<ParamField path="recordingHeaders" type="some Collection<HTTPField.Name>" default="[]">
+  Same as above.
+</ParamField>
+
+<ParamField path="redactingQueryParameters" type="Set<String>" default="[]">
+  Query parameter keys whose values are replaced with `REDACTED` in the `url.query` span attribute. When this set is empty, the raw query string is recorded as-is.
+</ParamField>
+
+<ParamField path="attributes" type="SpanAttributes?" default="nil">
+  Same as above.
+</ParamField>
+
+---
+
+## Span attributes recorded
+
+The following attributes are set on every span.
+
+| Attribute | Source | Notes |
+|---|---|---|
+| `http.request.method` | `request.method.rawValue` | e.g. `"GET"` |
+| `url.path` | `request.uri.path` | |
+| `url.query` | `request.uri.query` or redacted version | Omitted if no query string |
+| `user_agent.original` | `User-Agent` header | |
+| `http.request.body.size` | `Content-Length` header | Integer, when present |
+| `http.route` | `context.endpointPath` | Set after route matching |
+| `http.response.status_code` | `response.status.code` | Integer |
+| `http.response.body.size` | `response.body.contentLength` | When known |
+
+When the context conforms to `RemoteAddressRequestContext`, additional network attributes are recorded:
+
+| Attribute | Source |
+|---|---|
+| `net.sock.peer.port` | Remote port |
+| `net.sock.peer.addr` | IP address (IPv4 and IPv6) |
+| `net.sock.family` | `"inet6"` or `"unix"` for non-IPv4 |
+
+### Error spans
+
+If the downstream handler throws an error, the middleware records the error on the span via `span.recordError(_:)` and sets the span status to `.error` when the HTTP status code is in the 5xx range.
+
+---
+
+## RemoteAddressRequestContext
+
+Implement this protocol on your request context to enable IP address recording.
+
+```swift
+public protocol RemoteAddressRequestContext: RequestContext {
+    var remoteAddress: SocketAddress? { get }
+}
+```
+
+---
+
+## Span lifecycle
+
+The span is ended **after the response body is fully written** to the client (using `ResponseBody.withPostWriteClosure`), not when the handler returns. This ensures `http.response.body.size` is accurate and the span duration covers the complete request lifecycle.
+
+---
+
+## Example
+
+```swift
+import Hummingbird
+import Tracing
+
+// Initialize your tracing backend first
+// e.g. InstrumentationSystem.bootstrap(MyTracer())
+
+let router = Router()
+
+router.addMiddleware {
+    TracingMiddleware(
+        recordingHeaders: [.userAgent, .contentType],
+        redactingQueryParameters: ["api_key", "token"],
+        attributes: {
+            var attrs = SpanAttributes()
+            attrs["net.host.name"] = "api.example.com"
+            return attrs
+        }()
+    )
+}
+
+router.get("users/:id") { request, context in
+    let id = try context.parameters.require("id")
+    return "User \(id)"
+}
+```
+
+<Note>
+  The span operation name is initially set to `"HTTP <METHOD> route not found"` and updated to the matched route path after the handler runs. This means unmatched routes correctly appear as `"route not found"` in your tracing backend.
+</Note>

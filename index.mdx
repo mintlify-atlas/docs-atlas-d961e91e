@@ -1,97 +1,108 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Hummingbird"
+description: "A lightweight, flexible HTTP server framework for Swift built on SwiftNIO"
 ---
 
-## Setting up
+Hummingbird is a modern web application framework for Swift that runs on top of a SwiftNIO-based server. It is designed to require the minimum number of dependencies while still providing everything you need to build production-grade HTTP services.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build and run your first Hummingbird server in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="package" href="/installation">
+    Add Hummingbird to your Swift package
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Core Concepts" icon="book" href="/concepts/application">
+    Understand routing, middleware, and request contexts
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/application">
+    Full API documentation for all public types
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Hummingbird?
 
-Everything you need to create world-class documentation.
+Hummingbird is built for Swift developers who want a performant, composable HTTP framework without unnecessary complexity. It embraces Swift Concurrency with full async/await support and integrates seamlessly with the broader Swift server ecosystem.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="High performance routing" icon="bolt">
+    Trie-based router with wildcard and named parameter support for fast path matching
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Composable middleware" icon="layer-group">
+    Chain middleware to handle authentication, logging, CORS, tracing, and more
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Type-safe request context" icon="shield-check">
+    Pass typed data through the request pipeline without dictionaries or type casting
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Minimal dependencies" icon="feather">
+    Only depends on Apple's open-source Swift packages — no heavy third-party libraries
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Get started
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Add Hummingbird to your package">
+    Add the dependency to your `Package.swift` file and run `swift package resolve`.
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "Hummingbird", package: "hummingbird"),
+            ]
+        )
+    ]
+    ```
+  </Step>
+  <Step title="Create your first route">
+    Import Hummingbird and define a router with at least one route handler.
+
+    ```swift main.swift
+    import Hummingbird
+
+    let router = Router()
+    router.get("hello") { request, _ -> String in
+        return "Hello, world!"
+    }
+    ```
+  </Step>
+  <Step title="Run your application">
+    Wrap the router in an `Application` and call `runService()` to start the server.
+
+    ```swift main.swift
+    let app = Application(
+        router: router,
+        configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+    )
+    try await app.runService()
+    ```
+  </Step>
+</Steps>
+
+## Explore the framework
+
+<CardGroup cols={2}>
+  <Card title="Routing" icon="route" href="/concepts/routing">
+    Define routes with HTTP method helpers, path parameters, and route groups
+  </Card>
+  <Card title="Middleware" icon="filter" href="/concepts/middleware">
+    Intercept requests and responses with composable middleware
+  </Card>
+  <Card title="Encoding & Decoding" icon="arrows-left-right" href="/guides/encoding-decoding">
+    Decode request bodies and encode responses with Codable
+  </Card>
+  <Card title="Error handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Return typed HTTP errors with custom status codes and messages
+  </Card>
+  <Card title="Static files" icon="file" href="/guides/static-files">
+    Serve static assets from a directory with caching support
+  </Card>
+  <Card title="TLS & HTTP/2" icon="lock" href="/guides/tls-http2">
+    Secure your server with TLS and upgrade to HTTP/2
+  </Card>
+</CardGroup>

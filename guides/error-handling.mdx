@@ -1,0 +1,215 @@
+---
+title: 'Error handling'
+description: 'Throw typed HTTP errors and define custom error types that map to specific HTTP responses.'
+---
+
+Hummingbird converts thrown errors into HTTP responses. Any error that conforms to `HTTPResponseError` controls its own response. Errors that do not conform are returned as `500 Internal Server Error`.
+
+## HTTPResponseError protocol
+
+`HTTPResponseError` is the foundation for typed HTTP errors. Conform to it to control exactly how an error becomes a response.
+
+```swift Sources/Hummingbird/Error/HTTPResponseError.swift
+public protocol HTTPResponseError: Error, ResponseGenerator {
+    /// HTTP status code for this error
+    var status: HTTPResponse.Status { get }
+}
+```
+
+Because it also conforms to `ResponseGenerator`, you can implement `response(from:context:)` to produce a fully custom `Response` — including headers and a body.
+
+## HTTPError
+
+`HTTPError` is the built-in concrete implementation. It carries a status code, optional response headers, and an optional message.
+
+```swift Sources/Hummingbird/Error/HTTPError.swift
+public struct HTTPError: Error, HTTPResponseError, Sendable {
+    public var status: HTTPResponse.Status
+    public var headers: HTTPFields
+    public var body: String?
+}
+```
+
+### Initializers
+
+<AccordionGroup>
+  <Accordion title="Status only">
+    ```swift
+    throw HTTPError(.notFound)
+    throw HTTPError(.unauthorized)
+    throw HTTPError(.forbidden)
+    ```
+  </Accordion>
+  <Accordion title="Status with message">
+    ```swift
+    throw HTTPError(.badRequest, message: "Missing required field: email")
+    throw HTTPError(.unprocessableContent, message: "Invalid date format")
+    ```
+
+    When a message is present, Hummingbird encodes it as a JSON object:
+    ```json
+    { "error": { "message": "Missing required field: email" } }
+    ```
+  </Accordion>
+  <Accordion title="Status with headers and optional message">
+    ```swift
+    throw HTTPError(
+        .unauthorized,
+        headers: [.wwwAuthenticate: "Bearer realm=\"api\""],
+        message: "Token expired"
+    )
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### How the response is built
+
+When a message is provided, `HTTPError` uses the request context's `responseEncoder` to serialize the body, then overrides the status code and appends any extra headers:
+
+```swift Sources/Hummingbird/Error/HTTPError.swift
+public func response(from request: Request, context: some RequestContext) throws -> Response {
+    if let body {
+        let codable = CodableFormat(error: CodableFormat.ErrorFormat(message: body))
+        var response = try context.responseEncoder.encode(codable, from: request, context: context)
+        response.status = self.status
+        response.headers.append(contentsOf: self.headers)
+        return response
+    } else {
+        return Response(status: self.status, headers: self.headers)
+    }
+}
+```
+
+## Custom error types
+
+Conform your own error type to `HTTPResponseError` to produce tailored responses:
+
+```swift
+enum AppError: HTTPResponseError {
+    case userNotFound(id: String)
+    case insufficientPermissions(required: String)
+    case rateLimitExceeded(retryAfter: Int)
+
+    var status: HTTPResponse.Status {
+        switch self {
+        case .userNotFound: return .notFound
+        case .insufficientPermissions: return .forbidden
+        case .rateLimitExceeded: return .tooManyRequests
+        }
+    }
+
+    func response(from request: Request, context: some RequestContext) throws -> Response {
+        switch self {
+        case .userNotFound(let id):
+            return Response(
+                status: .notFound,
+                headers: [:],
+                body: .init(string: "{\"error\":\"User \(id) not found\"}")
+            )
+        case .insufficientPermissions(let required):
+            return Response(
+                status: .forbidden,
+                headers: [:],
+                body: .init(string: "{\"error\":\"Requires \(required) permission\"}")
+            )
+        case .rateLimitExceeded(let retryAfter):
+            return Response(
+                status: .tooManyRequests,
+                headers: [.retryAfter: String(retryAfter)],
+                body: .init()
+            )
+        }
+    }
+}
+```
+
+Then throw it from any route handler or middleware:
+
+```swift
+router.get("/users/:id") { request, context -> User in
+    let id = try context.parameters.require("id")
+    guard let user = await userStore.find(id: id) else {
+        throw AppError.userNotFound(id: id)
+    }
+    return user
+}
+```
+
+## EditedHTTPError
+
+`EditedHTTPError` wraps any existing error and appends additional headers to its response. It is used internally by `CORSMiddleware` to add CORS headers even when a downstream handler throws an error.
+
+```swift Sources/Hummingbird/Error/EditedHTTPError.swift
+struct EditedHTTPError: HTTPResponseError {
+    let originalError: any Error
+    var status: HTTPResponse.Status {
+        (self.originalError as? (any HTTPResponseError))?.status ?? .internalServerError
+    }
+    let additionalHeaders: HTTPFields
+
+    func response(from request: Request, context: some RequestContext) throws -> Response {
+        if let originalError = originalError as? (any HTTPResponseError) {
+            var response = try originalError.response(from: request, context: context)
+            response.headers.append(contentsOf: self.additionalHeaders)
+            return response
+        }
+        return Response(status: .internalServerError, headers: self.additionalHeaders)
+    }
+}
+```
+
+You can use the same pattern in your own middleware to augment errors with request-scoped headers without losing the original error's status code or body.
+
+## Errors in middleware
+
+Middleware can catch, transform, or re-throw errors. A common pattern is to catch specific errors and either handle them or rethrow with added context:
+
+```swift
+struct AuthMiddleware<Context: RequestContext>: RouterMiddleware {
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        guard let token = request.headers[.authorization] else {
+            throw HTTPError(.unauthorized, message: "Authorization header required")
+        }
+        guard isValid(token) else {
+            throw HTTPError(.unauthorized, message: "Invalid or expired token")
+        }
+        return try await next(request, context)
+    }
+}
+```
+
+## Unrecognized errors
+
+Any error that does not conform to `HTTPResponseError` results in a `500 Internal Server Error` response with no body. The error is logged at the `error` level. This prevents internal implementation details from leaking to clients.
+
+<Warning>
+Never throw raw `Swift.Error` types (such as database or network errors) directly from route handlers. Wrap them in an `HTTPError` or your own `HTTPResponseError` type so callers receive a meaningful status code.
+</Warning>
+
+## Common patterns
+
+```swift
+// 404 when a resource is not found
+guard let item = store[id] else {
+    throw HTTPError(.notFound)
+}
+
+// 400 for invalid input
+guard !name.isEmpty else {
+    throw HTTPError(.badRequest, message: "Name must not be empty")
+}
+
+// 409 for conflicts
+guard !store.contains(email) else {
+    throw HTTPError(.conflict, message: "Email already registered")
+}
+
+// 422 for validation failures
+guard isValidEmail(email) else {
+    throw HTTPError(.unprocessableContent, message: "Invalid email address")
+}
+```

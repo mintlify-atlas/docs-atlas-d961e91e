@@ -1,0 +1,218 @@
+---
+title: 'TLS and HTTP/2'
+description: 'Add TLS termination and HTTP/2 support to your Hummingbird server using HummingbirdTLS and HummingbirdHTTP2.'
+---
+
+Hummingbird separates transport concerns into two optional packages:
+
+- **HummingbirdTLS** — wraps any server child channel with TLS via swift-nio-ssl
+- **HummingbirdHTTP2** — adds HTTP/2 upgrade negotiation (ALPN) on top of TLS, or plaintext HTTP/2
+
+Both integrate through `HTTPServerBuilder`, which you pass to `Application` at initialization.
+
+## Package setup
+
+Add the targets to your `Package.swift`:
+
+```swift Package.swift
+.target(
+    name: "MyServer",
+    dependencies: [
+        .product(name: "Hummingbird", package: "hummingbird"),
+        .product(name: "HummingbirdTLS", package: "hummingbird"),      // TLS only
+        .product(name: "HummingbirdHTTP2", package: "hummingbird"),    // HTTP/2 (includes TLS)
+    ]
+)
+```
+
+## HTTPServerBuilder
+
+`HTTPServerBuilder` is the type you pass to `Application(server:)`. Three static factory methods cover the common configurations:
+
+| Builder | Description |
+|---|---|
+| `.http1()` | Plain HTTP/1.1 (default) |
+| `.tls(_:tlsConfiguration:)` | HTTP/1.1 with TLS |
+| `.http2Upgrade(tlsConfiguration:)` | TLS with HTTP/1.1 → HTTP/2 ALPN upgrade |
+| `.plaintextHTTP2()` | HTTP/2 without TLS (h2c) |
+
+## TLS configuration
+
+TLS configuration comes from `NIOSSL.TLSConfiguration`. The most common approach is to load a certificate and private key from PEM files:
+
+```swift
+import NIOSSL
+
+let certificateChain = try NIOSSLCertificate.fromPEMFile("cert.pem")
+    .map { NIOSSLCertificateSource.certificate($0) }
+let privateKey = try NIOSSLPrivateKey(file: "key.pem", format: .pem)
+
+var tlsConfig = TLSConfiguration.makeServerConfiguration(
+    certificateChain: certificateChain,
+    privateKey: .privateKey(privateKey)
+)
+```
+
+For development, you can generate a self-signed certificate with OpenSSL:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem \
+    -days 365 -nodes -subj "/CN=localhost"
+```
+
+## Adding TLS
+
+Import `HummingbirdTLS` and use the `.tls` builder:
+
+```swift Sources/HummingbirdTLS/HTTPServerBuilder+tls.swift
+public static func tls(
+    _ base: HTTPServerBuilder = .http1(),
+    tlsConfiguration: TLSConfiguration
+) throws -> HTTPServerBuilder
+```
+
+```swift
+import Hummingbird
+import HummingbirdTLS
+import NIOSSL
+
+let tlsConfig = try makeTLSConfiguration() // your TLSConfiguration
+
+let router = Router()
+router.get("/") { _, _ in "Hello over TLS" }
+
+let app = Application(
+    router: router,
+    server: try .tls(.http1(), tlsConfiguration: tlsConfig),
+    configuration: .init(address: .hostname("0.0.0.0", port: 8443))
+)
+try await app.runService()
+```
+
+### Custom verification callback
+
+Use `TLSChannelConfiguration` when you need to override the certificate verification logic — for example, to implement mutual TLS:
+
+```swift Sources/HummingbirdTLS/TLSChannel.swift
+public struct TLSChannelConfiguration: Sendable {
+    public let tlsConfiguration: TLSConfiguration
+    public var customVerificationCallback: CustomVerificationCallback?
+
+    public init(
+        tlsConfiguration: TLSConfiguration,
+        customAsyncVerificationCallback: @escaping @Sendable (
+            [NIOSSLCertificate]
+        ) async throws -> NIOSSLVerificationResult
+    )
+}
+```
+
+```swift
+let tlsChannelConfig = TLSChannelConfiguration(
+    tlsConfiguration: tlsConfig,
+    customAsyncVerificationCallback: { certificates in
+        // inspect peer certificates
+        return .certificateVerified
+    }
+)
+
+let app = Application(
+    router: router,
+    server: try .tls(.http1(), configuration: tlsChannelConfig)
+)
+```
+
+## HTTP/2 with TLS upgrade
+
+Import `HummingbirdHTTP2` and use `.http2Upgrade`. The server negotiates HTTP/1.1 or HTTP/2 via ALPN — clients that support HTTP/2 will automatically use it.
+
+```swift Sources/HummingbirdHTTP2/HTTPServerBuilder+http2.swift
+public static func http2Upgrade(
+    tlsConfiguration: TLSConfiguration,
+    configuration: HTTP2UpgradeChannel.Configuration = .init()
+) throws -> HTTPServerBuilder
+```
+
+```swift
+import Hummingbird
+import HummingbirdHTTP2
+import NIOSSL
+
+let tlsConfig = try makeTLSConfiguration()
+
+let router = Router()
+router.get("/") { _, _ in "Hello over HTTP/2" }
+
+let app = Application(
+    router: router,
+    server: try .http2Upgrade(tlsConfiguration: tlsConfig),
+    configuration: .init(address: .hostname("0.0.0.0", port: 443))
+)
+try await app.runService()
+```
+
+### Using TLSChannelConfiguration with HTTP/2
+
+```swift
+let app = Application(
+    router: router,
+    server: try .http2Upgrade(
+        tlsChannelConfiguration: TLSChannelConfiguration(
+            tlsConfiguration: tlsConfig,
+            customAsyncVerificationCallback: { _ in .certificateVerified }
+        )
+    )
+)
+```
+
+## Plaintext HTTP/2 (h2c)
+
+For environments where TLS is handled by a proxy (such as a Kubernetes ingress), you can run HTTP/2 without TLS. Because there is no ALPN negotiation, clients must know in advance they are connecting to an HTTP/2 server.
+
+```swift Sources/HummingbirdHTTP2/HTTPServerBuilder+http2.swift
+public static func plaintextHTTP2(
+    configuration: HTTP2Channel.Configuration = .init()
+) -> HTTPServerBuilder
+```
+
+```swift
+let app = Application(
+    router: router,
+    server: .plaintextHTTP2()
+)
+```
+
+Test it with curl:
+
+```bash
+curl --http2-prior-knowledge http://localhost:8080/
+```
+
+<Warning>
+Plaintext HTTP/2 is not supported by most browsers. It is intended for server-to-server communication or environments with a TLS-terminating proxy in front.
+</Warning>
+
+## Bind address
+
+All configurations use `BindAddress` to specify where the server listens:
+
+```swift Sources/HummingbirdCore/Server/BindAddress.swift
+// TCP hostname and port
+.hostname("0.0.0.0", port: 8443)
+
+// Unix domain socket
+.unixDomainSocket(path: "/tmp/app.sock")
+```
+
+On Apple platforms with the Network framework, you can also use an `NWEndpoint`.
+
+## Platform notes
+
+<AccordionGroup>
+  <Accordion title="macOS with NIO Transport Services">
+    On macOS you can use `NIOTransportServices` (backed by Network.framework) instead of the NIO POSIX transport. Import `NIOTransportServices` and use `.nwEndpoint(_:)` as the bind address. NIO Transport Services has native TLS support through the system's Security framework — you may not need swift-nio-ssl in that case.
+  </Accordion>
+  <Accordion title="Linux">
+    On Linux, swift-nio-ssl (BoringSSL) is required for all TLS configurations. Ensure your deployment environment has the necessary system libraries. Both `HummingbirdTLS` and `HummingbirdHTTP2` depend on `swift-nio-ssl` and will pull it in automatically.
+  </Accordion>
+</AccordionGroup>

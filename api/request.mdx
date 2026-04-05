@@ -1,0 +1,171 @@
+---
+title: Request
+description: The struct that represents an incoming HTTP request, including the method, URI, headers, and body.
+---
+
+`Request` holds everything needed to process an incoming HTTP request. It is a value type that is passed by value through the middleware chain and into route handlers.
+
+```swift
+public struct Request: Sendable
+```
+
+---
+
+## Properties
+
+<ResponseField name="method" type="HTTPRequest.Method">
+  The HTTP method of the request, for example `.get`, `.post`, `.put`, or `.delete`.
+
+  ```swift
+  public var method: HTTPRequest.Method { self.head.method }
+  ```
+</ResponseField>
+
+<ResponseField name="uri" type="URI">
+  The parsed request URI. See [URI](#uri) below for the full property list.
+
+  ```swift
+  public let uri: URI
+  ```
+</ResponseField>
+
+<ResponseField name="headers" type="HTTPFields">
+  All HTTP request headers. Access individual headers by name:
+
+  ```swift
+  let contentType = request.headers[.contentType]
+  let allCookies = request.headers[values: .cookie]
+  ```
+</ResponseField>
+
+<ResponseField name="body" type="RequestBody">
+  The request body as an `AsyncSequence` of `ByteBuffer`s. See [RequestBody](/api/request-body) for details.
+</ResponseField>
+
+<ResponseField name="head" type="HTTPRequest">
+  The raw `HTTPRequest` value from the `HTTPTypes` package, containing the status line and header fields.
+</ResponseField>
+
+---
+
+## Initializer
+
+```swift
+public init(
+    head: HTTPRequest,
+    body: RequestBody
+)
+```
+
+<ParamField path="head" type="HTTPRequest" required>
+  The HTTP request head. The `uri` property is derived from `head.path`.
+</ParamField>
+
+<ParamField path="body" type="RequestBody" required>
+  The request body.
+</ParamField>
+
+---
+
+## collectBody(upTo:)
+
+Collects the entire streaming body into a single `ByteBuffer` and stores it back on the request so subsequent accesses return the buffered data.
+
+```swift
+public mutating func collectBody(upTo maxSize: Int) async throws -> ByteBuffer
+```
+
+<ParamField path="maxSize" type="Int" required>
+  Maximum number of bytes to collect. An error is thrown if the body exceeds this limit.
+</ParamField>
+
+If you do not need to store the result back on the request, use `request.body.collect(upTo:)` directly instead.
+
+---
+
+## URI
+
+`URI` is a lightweight URL parser. All components are optional except `path`.
+
+```swift
+public struct URI: Sendable, CustomStringConvertible, ExpressibleByStringLiteral
+```
+
+<ResponseField name="scheme" type="URI.Scheme?">
+  The URL scheme. Built-in values include `.http`, `.https`, `.unix`, `.ws`, and `.wss`. Returns `nil` for path-only URIs.
+</ResponseField>
+
+<ResponseField name="host" type="String?">
+  The host component. Returns `nil` for path-only URIs.
+</ResponseField>
+
+<ResponseField name="port" type="Int?">
+  The port number. Returns `nil` when no port is present in the URI.
+</ResponseField>
+
+<ResponseField name="path" type="String">
+  The path component. Defaults to `"/"` when no explicit path is present.
+</ResponseField>
+
+<ResponseField name="query" type="String?">
+  The raw query string, without the leading `?`. Returns `nil` when no query is present.
+</ResponseField>
+
+<ResponseField name="queryParameters" type="FlatDictionary<Substring, Substring>">
+  The query string parsed into key-value pairs. Values are percent-decoded. Empty-value keys are included with an empty string value.
+</ResponseField>
+
+```swift
+let uri = URI("https://api.example.com/users?page=2&sort=asc")
+uri.scheme         // .https
+uri.host           // "api.example.com"
+uri.path           // "/users"
+uri.query          // "page=2&sort=asc"
+uri.queryParameters["page"]  // "2"
+```
+
+---
+
+## Accessing route parameters
+
+Route parameters captured from the URL pattern (e.g. `/users/:id`) are available on the request **context**, not the request itself.
+
+```swift
+router.get("users/:id") { request, context in
+    let id = try context.parameters.require("id")
+    return "User \(id)"
+}
+```
+
+Use `context.parameters["key"]` for optional access or `context.parameters.require("key")` to throw a `400` error when the parameter is missing.
+
+---
+
+## Accessing cookies
+
+Cookies are accessible via the context-level `request` extension when using the full Hummingbird stack.
+
+```swift
+router.get("profile") { request, context in
+    let session = request.cookies["session"]?.value
+    return "Session: \(session ?? "none")"
+}
+```
+
+`request.cookies` returns a `Cookies` value that you subscript with the cookie name to get a `Cookie?`.
+
+---
+
+## Example
+
+```swift
+router.post("echo") { request, context in
+    let body = try await request.collectBody(upTo: 1024 * 1024)
+    let text = String(buffer: body)
+    return Response(
+        status: .ok,
+        headers: [.contentType: "text/plain"],
+        body: .init(byteBuffer: body)
+    )
+}
+```

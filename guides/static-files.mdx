@@ -1,0 +1,210 @@
+---
+title: 'Serving static files'
+description: 'Serve static assets from disk using FileMiddleware, with support for caching, range requests, and custom MIME types.'
+---
+
+`FileMiddleware` intercepts `404 Not Found` responses from the router and attempts to serve a matching file from a local directory. It supports `GET` and `HEAD` requests, conditional requests (`If-None-Match`, `If-Modified-Since`), byte-range requests, ETags, and configurable cache-control headers.
+
+<Note>
+`FileMiddleware` requires macOS 14, iOS 17, tvOS 17 or later.
+</Note>
+
+## Basic setup
+
+Add `FileMiddleware` to your router. By default it serves files from the `"public"` directory relative to the working directory:
+
+```swift
+import Hummingbird
+
+let router = Router()
+
+// Serve files from the "public/" directory
+router.middlewares.add(FileMiddleware())
+
+let app = Application(router: router)
+```
+
+To serve from a different directory, pass it as the first argument:
+
+```swift
+router.middlewares.add(FileMiddleware("assets"))
+```
+
+Files are served when the router returns a `404` for a `GET` or `HEAD` request and a matching file exists under the root folder.
+
+## Constructor parameters
+
+```swift Sources/Hummingbird/Middleware/FileMiddleware.swift
+public init(
+    _ rootFolder: String = "public",
+    urlBasePath: String? = nil,
+    cacheControl: CacheControl = .init([]),
+    searchForIndexHtml: Bool = false,
+    threadPool: NIOThreadPool = NIOThreadPool.singleton,
+    logger: Logger = Logger(label: "FileMiddleware")
+) where Provider == LocalFileSystem
+```
+
+| Parameter | Description |
+|---|---|
+| `rootFolder` | Root directory to serve files from. Defaults to `"public"`. |
+| `urlBasePath` | URL prefix to strip before mapping to a file path. |
+| `cacheControl` | Per-media-type cache-control rules. |
+| `searchForIndexHtml` | When `true`, serving a directory path returns `index.html` if it exists. |
+| `threadPool` | NIO thread pool used for non-blocking file I/O. |
+| `logger` | Logger for file-serving diagnostics. |
+
+## Cache-control headers
+
+Use `CacheControl` to attach `Cache-Control` response headers based on the MIME type of the file being served.
+
+```swift
+import Hummingbird
+
+let cacheControl = CacheControl([
+    (.text(.html), [.noCache]),
+    (.text(.css), [.public, .maxAge(31_536_000), .immutable]),
+    (.image(.jpeg), [.public, .maxAge(86_400)]),
+    (.image(.png),  [.public, .maxAge(86_400)]),
+])
+
+router.middlewares.add(
+    FileMiddleware(
+        "public",
+        cacheControl: cacheControl
+    )
+)
+```
+
+Available `CacheControlValue` directives:
+
+| Directive | Description |
+|---|---|
+| `.noStore` | Do not cache the response |
+| `.noCache` | Revalidate before every use |
+| `.private` | Cache in browser only |
+| `.public` | Cache in any shared cache |
+| `.maxAge(Int)` | Fresh for N seconds |
+| `.mustRevalidate` | Revalidate when stale |
+| `.mustUnderstand` | Cache only if status code is understood |
+| `.noTransform` | Intermediaries must not transform the response |
+| `.immutable` | Response will not change while fresh |
+| `.custom(String)` | Any custom directive string |
+
+## SPA serving with searchForIndexHtml
+
+Set `searchForIndexHtml: true` to return `index.html` when a directory path is requested. This is the standard pattern for single-page applications where the client-side router handles all paths:
+
+```swift
+router.middlewares.add(
+    FileMiddleware(
+        "dist",
+        searchForIndexHtml: true
+    )
+)
+```
+
+When a folder is requested without a trailing slash, the middleware issues a permanent redirect to the path with a trailing slash before checking for `index.html`.
+
+## Serving from a URL sub-path
+
+Use `urlBasePath` to mount the middleware at a specific path prefix. Requests that do not start with that prefix are not handled by the middleware.
+
+```swift
+// Files in "public/" are accessible under /static/...
+router.middlewares.add(
+    FileMiddleware(
+        "public",
+        urlBasePath: "/static"
+    )
+)
+```
+
+The prefix is stripped from the request path before looking up the file, so `GET /static/logo.png` maps to `public/logo.png`.
+
+## Range requests
+
+`FileMiddleware` supports the `Range` request header for partial content delivery. It sets the `Accept-Ranges: bytes` header on all responses and returns `206 Partial Content` when a valid range is requested.
+
+The `If-Range` conditional is also respected — if the ETag or `Last-Modified` value in `If-Range` no longer matches, the full file is returned instead of the range.
+
+## ETag and conditional requests
+
+Every file response includes:
+
+- `ETag` — a weak tag derived from the file's modification date and size
+- `Last-Modified` — the file's modification date as an HTTP date string
+
+The middleware validates `If-None-Match` and `If-Modified-Since` request headers and returns `304 Not Modified` when the file has not changed, saving bandwidth.
+
+## Custom MIME types
+
+If you need to serve files with extensions that are not in Hummingbird's built-in MIME type map, use `withAdditionalMediaType`:
+
+```swift Sources/Hummingbird/Middleware/FileMiddleware.swift
+public func withAdditionalMediaType(
+    _ mediaType: MediaType,
+    mappedToFileExtension fileExtension: String
+) -> FileMiddleware
+```
+
+Chain multiple calls or pass a dictionary:
+
+```swift
+let middleware = FileMiddleware("public")
+    .withAdditionalMediaType(.application(.json), mappedToFileExtension: "geojson")
+    .withAdditionalMediaType(.init(type: "model", subType: "gltf+json"), mappedToFileExtension: "gltf")
+
+router.middlewares.add(middleware)
+```
+
+To add several extensions at once:
+
+```swift
+let middleware = FileMiddleware("public")
+    .withAdditionalMediaTypes(forFileExtensions: [
+        "wasm": .application(.octetStream),
+        "avif": .image(.init("avif")),
+    ])
+```
+
+## Custom FileProvider
+
+For advanced use cases — such as serving files from memory, a cloud bucket, or a custom virtual file system — implement the `FileProvider` protocol:
+
+```swift
+public protocol FileProvider {
+    associatedtype FileIdentifier
+    associatedtype FileAttributes: FileMiddlewareFileAttributes
+
+    func getFileIdentifier(_ path: String) -> FileIdentifier?
+    func getAttributes(id: FileIdentifier) async throws -> FileAttributes?
+    func loadFile(id: FileIdentifier, context: some RequestContext) async throws -> ResponseBody
+    func loadFile(id: FileIdentifier, range: ClosedRange<Int>, context: some RequestContext) async throws -> ResponseBody
+}
+```
+
+`FileMiddlewareFileAttributes` requires three properties:
+
+```swift Sources/Hummingbird/Middleware/FileMiddleware.swift
+public protocol FileMiddlewareFileAttributes {
+    var isFolder: Bool { get }
+    var size: Int { get }
+    var modificationDate: Date { get }
+}
+```
+
+Pass your provider to the custom `FileMiddleware` initializer:
+
+```swift
+let provider = MyCustomFileProvider()
+router.middlewares.add(
+    FileMiddleware(
+        fileProvider: provider,
+        cacheControl: cacheControl,
+        searchForIndexHtml: true
+    )
+)
+```
+
+`LocalFileSystem` is the default provider used when you initialize `FileMiddleware` with a folder path.

@@ -1,0 +1,196 @@
+---
+title: ResponseBody
+description: The response body type, supporting buffered, sequence-based, and streaming write patterns with an optional known content length.
+---
+
+`ResponseBody` wraps a write closure that is called when the framework is ready to flush the response to the client. It supports buffered bodies from a `ByteBuffer`, bodies built from sequences, and fully streaming bodies written chunk by chunk.
+
+```swift
+public struct ResponseBody: Sendable
+```
+
+---
+
+## Properties
+
+<ResponseField name="contentLength" type="Int?">
+  The number of bytes in the body, when known at construction time. `nil` for streaming bodies where the length is not predetermined. The `Response` initializer uses this value to set the `Content-Length` header automatically.
+</ResponseField>
+
+---
+
+## Initializers
+
+### Empty body
+
+```swift
+public init()
+```
+
+Creates a zero-byte body with `contentLength` of `0`. Used as the default body for responses that carry no content.
+
+### ByteBuffer
+
+```swift
+public init(byteBuffer: ByteBuffer)
+```
+
+Creates a body from a single `ByteBuffer`. `contentLength` is set to `byteBuffer.readableBytes`.
+
+```swift
+let body = ResponseBody(byteBuffer: ByteBuffer(string: "Hello, world!"))
+```
+
+### Sequence of ByteBuffers
+
+```swift
+public init<BufferSequence: Sequence & Sendable>(
+    contentsOf byteBuffers: BufferSequence
+) where BufferSequence.Element == ByteBuffer
+```
+
+Creates a body from a `Sequence` of `ByteBuffer`s. The total `contentLength` is computed by summing the readable bytes of each buffer.
+
+### AsyncSequence of ByteBuffers
+
+```swift
+public init<BufferSequence: AsyncSequence & Sendable>(
+    asyncSequence: BufferSequence
+) where BufferSequence.Element == ByteBuffer
+```
+
+Creates a streaming body from an `AsyncSequence`. `contentLength` is `nil` because the total size is not known upfront.
+
+```swift
+let body = ResponseBody(asyncSequence: myAsyncStream)
+```
+
+### Write closure
+
+```swift
+public init(
+    contentLength: Int? = nil,
+    _ write: @Sendable @escaping (inout any ResponseBodyWriter) async throws -> Void
+)
+```
+
+The most flexible initializer. The `write` closure receives a `ResponseBodyWriter` and is responsible for writing all content and calling `writer.finish(_:)` when done.
+
+```swift
+let body = ResponseBody(contentLength: data.count) { writer in
+    try await writer.write(ByteBuffer(data: data))
+    try await writer.finish(nil)
+}
+```
+
+<ParamField path="contentLength" type="Int?" default="nil">
+  Optional known size. When provided, the framework sets `Content-Length` automatically.
+</ParamField>
+
+<ParamField path="write" type="@Sendable (inout any ResponseBodyWriter) async throws -> Void" required>
+  Closure called when the framework is ready to write. Must call `writer.finish(_:)` exactly once to signal completion.
+</ParamField>
+
+---
+
+## ResponseBodyWriter protocol
+
+The `ResponseBodyWriter` protocol is what the write closure receives. It lets you push `ByteBuffer`s and optional trailing headers.
+
+```swift
+public protocol ResponseBodyWriter {
+    mutating func write(_ buffer: ByteBuffer) async throws
+    mutating func write(contentsOf buffers: some Sequence<ByteBuffer>) async throws
+    consuming func finish(_ trailingHeaders: HTTPFields?) async throws
+}
+```
+
+<ResponseField name="write(_:)" type="mutating func">
+  Writes a single `ByteBuffer` to the response.
+</ResponseField>
+
+<ResponseField name="write(contentsOf:)" type="mutating func">
+  Writes a sequence of `ByteBuffer`s. Default implementation calls `write(_:)` for each element.
+</ResponseField>
+
+<ResponseField name="write(_:) AsyncSequence overload" type="mutating func">
+  Writes an `AsyncSequence` of `ByteBuffer`s. Available as a default extension method.
+</ResponseField>
+
+<ResponseField name="finish(_:)" type="consuming func">
+  Signals that writing is complete. Pass trailing `HTTPFields` to include HTTP trailers, or `nil` for none.
+</ResponseField>
+
+### map(_:)
+
+`ResponseBodyWriter` has a `map` method that returns a new writer applying a transform to every `ByteBuffer` written through it.
+
+```swift
+public consuming func map(
+    _ transform: @escaping @Sendable (ByteBuffer) async throws -> ByteBuffer
+) -> some ResponseBodyWriter
+```
+
+---
+
+## map(_:) on ResponseBody
+
+`ResponseBody` also has a `map` that returns a new `ResponseBody` applying a transform to every `ByteBuffer` in the body.
+
+```swift
+public consuming func map(
+    _ transform: @escaping @Sendable (ByteBuffer) async throws -> ByteBuffer
+) -> ResponseBody
+```
+
+Useful for applying compression or encoding to a body without re-implementing the write logic.
+
+---
+
+## withPostWriteClosure(_:)
+
+Returns a new `ResponseBody` that calls the provided closure **after** the body has been fully flushed to the client.
+
+```swift
+package func withPostWriteClosure(
+    _ postWrite: @escaping @Sendable () async -> Void
+) -> Self
+```
+
+`TracingMiddleware` and `MetricsMiddleware` use this internally to end spans and record timers at the correct moment.
+
+---
+
+## Streaming example
+
+```swift
+router.get("stream") { _, _ in
+    let body = ResponseBody { writer in
+        for i in 1...5 {
+            let chunk = ByteBuffer(string: "chunk \(i)\n")
+            try await writer.write(chunk)
+        }
+        try await writer.finish(nil)
+    }
+    return Response(status: .ok, body: body)
+}
+```
+
+---
+
+## Buffered example
+
+```swift
+router.get("hello") { _, _ in
+    let buffer = ByteBuffer(string: "Hello, world!")
+    return Response(
+        status: .ok,
+        headers: [.contentType: "text/plain; charset=utf-8"],
+        body: .init(byteBuffer: buffer)
+    )
+}
+```
+
+<Note>
+  When you set `response.body`, the `Content-Length` header on the response is updated automatically if the new body has a known `contentLength`. Streaming bodies with `contentLength == nil` will not set the header.
+</Note>

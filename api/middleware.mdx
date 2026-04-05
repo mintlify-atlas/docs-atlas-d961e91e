@@ -1,0 +1,170 @@
+---
+title: Middleware
+description: Core middleware protocols and how to add middleware to a Hummingbird router.
+---
+
+Middleware in Hummingbird intercepts requests before they reach a route handler and processes responses on the way back. Each middleware calls `next` to pass control down the chain, or returns a response directly to short-circuit.
+
+```swift
+public protocol MiddlewareProtocol<Input, Output, Context>: Sendable {
+    associatedtype Input
+    associatedtype Output
+    associatedtype Context
+
+    func handle(
+        _ input: Input,
+        context: Context,
+        next: (Input, Context) async throws -> Output
+    ) async throws -> Output
+}
+```
+
+---
+
+## MiddlewareProtocol
+
+The generic base protocol for all middleware.
+
+<ResponseField name="Input" type="associatedtype">
+  The type of value passed into the middleware. For HTTP middleware this is `Request`.
+</ResponseField>
+
+<ResponseField name="Output" type="associatedtype">
+  The type of value the middleware returns. For HTTP middleware this is `Response`.
+</ResponseField>
+
+<ResponseField name="Context" type="associatedtype">
+  The request context type. Must conform to `RequestContext`.
+</ResponseField>
+
+### handle(_:context:next:)
+
+The single required method. Call `next(input, context)` to pass the request to the next middleware or route handler, or return a `Response` directly to short-circuit the chain.
+
+```swift
+func handle(
+    _ input: Input,
+    context: Context,
+    next: (Input, Context) async throws -> Output
+) async throws -> Output
+```
+
+---
+
+## RouterMiddleware
+
+A specialization of `MiddlewareProtocol` that fixes `Input` to `Request` and `Output` to `Response`. This is the protocol you conform to when writing HTTP middleware.
+
+```swift
+public protocol RouterMiddleware<Context>: MiddlewareProtocol
+where Input == Request, Output == Response {}
+```
+
+---
+
+## MiddlewareGroup
+
+`MiddlewareGroup<Context>` holds an ordered list of middleware and assembles them into a responder chain.
+
+```swift
+@available(macOS 14, iOS 17, tvOS 17, *)
+public final class MiddlewareGroup<Context>
+```
+
+### add(_:)
+
+Appends a middleware to the group. Middleware only applies to routes registered **after** this call.
+
+```swift
+@discardableResult
+public func add(
+    _ middleware: any MiddlewareProtocol<Request, Response, Context>
+) -> Self
+```
+
+### constructResponder(finalResponder:)
+
+Wraps the final route responder in the collected middleware stack, outermost-first.
+
+```swift
+public func constructResponder(
+    finalResponder: any HTTPResponder<Context>
+) -> any HTTPResponder<Context>
+```
+
+---
+
+## Adding middleware to a router
+
+### router.add(middleware:)
+
+Adds a single middleware. Only affects routes registered after this call.
+
+```swift
+router.add(middleware: LogRequestsMiddleware(.info))
+router.get("hello") { _, _ in "world" }
+```
+
+### router.addMiddleware {}
+
+Adds multiple middleware at once using the `MiddlewareFixedTypeBuilder` result builder. This offers a slight performance advantage over adding them individually because the middleware types are resolved at compile time.
+
+```swift
+router.addMiddleware {
+    LogRequestsMiddleware(.info)
+    MetricsMiddleware()
+}
+```
+
+<Note>
+  Middleware is applied only to routes registered **after** the `add` or `addMiddleware` call. Routes added before are unaffected.
+</Note>
+
+---
+
+## Writing custom middleware
+
+Conform to `RouterMiddleware` and implement `handle(_:context:next:)`.
+
+```swift
+import Hummingbird
+
+struct TimingMiddleware<Context: RequestContext>: RouterMiddleware {
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        let start = Date()
+        let response = try await next(request, context)
+        let elapsed = Date().timeIntervalSince(start)
+        context.logger.info("Request took \(elapsed)s")
+        return response
+    }
+}
+```
+
+To short-circuit the chain and return immediately without calling `next`:
+
+```swift
+struct BlockMiddleware<Context: RequestContext>: RouterMiddleware {
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        if request.headers[.authorization] == nil {
+            return Response(status: .unauthorized)
+        }
+        return try await next(request, context)
+    }
+}
+```
+
+Register the middleware before the routes it should protect:
+
+```swift
+let router = Router()
+router.add(middleware: BlockMiddleware())
+router.get("protected") { _, _ in "secret" }
+```

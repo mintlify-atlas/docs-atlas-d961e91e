@@ -1,0 +1,183 @@
+---
+title: RouterMethods
+description: Protocol extension that provides HTTP verb helpers, route groups, and middleware scoping on any conforming router type.
+---
+
+`RouterMethods` is the protocol that powers the fluent routing API on both `Router` and `RouterGroup`. Any type conforming to it gets all the HTTP method helpers and group factories for free.
+
+## HTTP verb methods
+
+All verb methods accept a `RouterPath` (a string literal) and an async handler closure returning any type conforming to `ResponseGenerator`.
+
+### `get(_:use:)`
+
+```swift
+@discardableResult public func get(
+    _ path: RouterPath = "",
+    use handler: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+<ParamField path="path" type="RouterPath" default='""'>
+  The URI path pattern to match. Supports string literals, `:parameter` captures, and `*` wildcards.
+</ParamField>
+<ParamField path="handler" type="(Request, Context) async throws -> some ResponseGenerator">
+  Async closure invoked when the path and method match.
+</ParamField>
+
+### `post(_:use:)`
+
+```swift
+@discardableResult public func post(
+    _ path: RouterPath = "",
+    use handler: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+### `put(_:use:)`
+
+```swift
+@discardableResult public func put(
+    _ path: RouterPath = "",
+    use handler: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+### `delete(_:use:)`
+
+```swift
+@discardableResult public func delete(
+    _ path: RouterPath = "",
+    use handler: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+### `patch(_:use:)`
+
+```swift
+@discardableResult public func patch(
+    _ path: RouterPath = "",
+    use handler: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+### `head(_:use:)`
+
+```swift
+@discardableResult public func head(
+    _ path: RouterPath = "",
+    use handler: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+### `on(_:method:use:)`
+
+The generic form that accepts any `HTTPRequest.Method`:
+
+```swift
+@discardableResult public func on(
+    _ path: RouterPath,
+    method: HTTPRequest.Method,
+    use closure: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+<ParamField path="path" type="RouterPath">
+  URI path pattern.
+</ParamField>
+<ParamField path="method" type="HTTPRequest.Method">
+  HTTP method such as `.get`, `.post`, `.options`, or any custom method.
+</ParamField>
+<ParamField path="closure" type="(Request, Context) async throws -> some ResponseGenerator">
+  Async handler closure.
+</ParamField>
+
+## RouterPath syntax
+
+`RouterPath` is a `ExpressibleByStringLiteral` type. Supported patterns:
+
+| Pattern | Description | Example match |
+|---|---|---|
+| `"hello"` | Exact segment match | `/hello` |
+| `":id"` | Named parameter capture | `/users/42` → `id = "42"` |
+| `"*"` | Single-segment wildcard | `/files/anything` |
+| `"**"` | Multi-segment wildcard | `/files/a/b/c` |
+
+Access captured parameters in your handler:
+
+```swift
+router.get("users/:id") { request, context -> String in
+    let id = try context.parameters.require("id")
+    return "User \(id)"
+}
+```
+
+## Groups
+
+### `group(_:) -> RouterGroup<Context>`
+
+Creates a `RouterGroup` that prefixes all child routes with the given path:
+
+```swift
+public func group(_ path: RouterPath = "") -> RouterGroup<Context>
+```
+
+```swift
+let api = router.group("api/v1")
+api.get("users") { _, _ in ... }   // matches GET /api/v1/users
+api.post("users") { _, _ in ... }  // matches POST /api/v1/users
+```
+
+### `group(_:context:) -> RouterGroup<TargetContext>` (context transform)
+
+Returns a group that also transforms the request context. The target context must have `Source == Context`:
+
+```swift
+public func group<TargetContext>(
+    _ path: RouterPath = "",
+    context: TargetContext.Type
+) -> RouterGroup<TargetContext> where TargetContext.Source == Context
+```
+
+### `group(_:context:) -> RouterGroup<TargetContext>` (child context)
+
+For contexts conforming to `ChildRequestContext` where `ParentContext == Context`:
+
+```swift
+public func group<TargetContext: ChildRequestContext>(
+    _ path: RouterPath = "",
+    context: TargetContext.Type
+) -> RouterGroup<TargetContext> where TargetContext.ParentContext == Context
+```
+
+## Middleware
+
+### `add(middleware:)`
+
+Adds a single middleware. Only applies to routes registered **after** this call:
+
+```swift
+func add(middleware: any MiddlewareProtocol<Request, Response, Context>) -> Self
+```
+
+### `addMiddleware(_:)`
+
+Adds multiple middleware at once using the `@MiddlewareFixedTypeBuilder` result builder. Provides a slight performance advantage over chaining `add(middleware:)` calls:
+
+```swift
+@discardableResult public func addMiddleware(
+    @MiddlewareFixedTypeBuilder<Request, Response, Context> buildMiddlewareStack: () -> some MiddlewareProtocol<Request, Response, Context>
+) -> Self
+```
+
+```swift
+router.addMiddleware {
+    LogRequestsMiddleware(.info)
+    MetricsMiddleware()
+}
+router.get("hello") { _, _ in "Hello" }
+```
+
+<Note>
+  Middleware only applies to routes added **after** the `addMiddleware` / `add(middleware:)` call. Routes registered before are unaffected.
+</Note>

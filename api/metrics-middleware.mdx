@@ -1,0 +1,142 @@
+---
+title: MetricsMiddleware and LogRequestsMiddleware
+description: Middleware for recording request metrics and logging HTTP requests using Swift Metrics and Swift Log.
+---
+
+## MetricsMiddleware
+
+`MetricsMiddleware<Context>` records request counts, active request counts, request durations, and error counts for every HTTP request. It uses [Swift Metrics](https://github.com/apple/swift-metrics), which requires a metrics backend to be initialized before any metrics are recorded.
+
+```swift
+public struct MetricsMiddleware<Context: RequestContext>: RouterMiddleware {
+    public init()
+}
+```
+
+### Metrics recorded
+
+All metrics include dimensions derived from the request and response.
+
+<ResponseField name="http.server.active_requests" type="Meter">
+  Tracks the number of requests currently in-flight. Incremented when the request arrives and decremented after the response body is fully written. Dimension: `http.request.method`.
+</ResponseField>
+
+<ResponseField name="hb.requests" type="Counter">
+  Incremented once per completed request (both successful and errored). Dimensions: `http.route`, `http.request.method`, `http.response.status_code`.
+</ResponseField>
+
+<ResponseField name="http.server.request.duration" type="Timer">
+  Records the time from when the request is received until the response body is fully written. Preferred display unit is seconds. Dimensions: `http.route`, `http.request.method`, `http.response.status_code`.
+</ResponseField>
+
+<ResponseField name="hb.request.errors" type="Counter">
+  Incremented once per request that throws an error. Dimensions: `http.route`, `http.request.method`, `error.type` (the HTTP status code string, or `"500"` for non-HTTP errors).
+</ResponseField>
+
+<Note>
+  The `hb.requests` counter and `http.server.request.duration` timer are recorded **after the response body is fully flushed** to the client, using `ResponseBody.withPostWriteClosure`. The `http.route` dimension is populated from the matched endpoint path, falling back to `"Unknown"` for unmatched routes.
+</Note>
+
+### Setup
+
+```swift
+import Hummingbird
+import Metrics
+// import your metrics backend, e.g. import PrometheusMetrics
+
+// Initialize your metrics backend first:
+// MetricsSystem.bootstrap(PrometheusMetricsFactory())
+
+let router = Router()
+
+router.addMiddleware {
+    MetricsMiddleware()
+}
+
+router.get("health") { _, _ in HTTPResponse.Status.ok }
+```
+
+---
+
+## LogRequestsMiddleware
+
+`LogRequestsMiddleware<Context>` logs a line for every incoming request using [Swift Log](https://github.com/apple/swift-log). By default it logs the request path and method. You can optionally include or filter request headers.
+
+```swift
+public struct LogRequestsMiddleware<Context: RequestContext>: RouterMiddleware
+```
+
+### Initializer
+
+```swift
+public init(
+    _ logLevel: Logger.Level,
+    includeHeaders: HeaderFilter = .none,
+    redactHeaders: [HTTPField.Name] = []
+)
+```
+
+<ParamField path="logLevel" type="Logger.Level" required>
+  The log level at which requests are emitted, for example `.info` or `.debug`.
+</ParamField>
+
+<ParamField path="includeHeaders" type="HeaderFilter" default=".none">
+  Controls which request headers are included in the log entry. See [HeaderFilter](#headerfilter) below.
+</ParamField>
+
+<ParamField path="redactHeaders" type="[HTTPField.Name]" default="[]">
+  Headers whose values are replaced with `"***"` in the log output. Only headers that are included by `includeHeaders` can be redacted.
+</ParamField>
+
+### HeaderFilter
+
+```swift
+public struct HeaderFilter: Sendable, ExpressibleByArrayLiteral
+```
+
+<ResponseField name=".none" type="static">
+  No headers are logged. This is the default.
+</ResponseField>
+
+<ResponseField name=".all(except:)" type="static func">
+  All request headers are logged except the ones in the `except` array.
+</ResponseField>
+
+<ResponseField name=".some([HTTPField.Name])" type="static func">
+  Only the listed headers are logged.
+</ResponseField>
+
+`HeaderFilter` is `ExpressibleByArrayLiteral`, so you can write it as a Swift array literal of `HTTPField.Name` values, which is equivalent to `.some(...)`.
+
+### Log metadata keys
+
+Each log entry contains the following metadata:
+
+| Key | Value |
+|---|---|
+| `hb.request.path` | Full request URI |
+| `hb.request.method` | HTTP method string (e.g. `"GET"`) |
+| `hb.request.headers` | Header map (present when `includeHeaders` is not `.none`) |
+
+### Setup
+
+```swift
+import Hummingbird
+import Logging
+
+let router = Router()
+
+router.addMiddleware {
+    LogRequestsMiddleware(
+        .info,
+        includeHeaders: .all(except: [.authorization, .cookie]),
+        redactHeaders: [.authorization]
+    )
+}
+
+router.get("ping") { _, _ in "pong" }
+```
+
+<Note>
+  `LogRequestsMiddleware` logs the request on the way **in** and does not log the response. Combine it with `MetricsMiddleware` or `TracingMiddleware` for response-level observability.
+</Note>

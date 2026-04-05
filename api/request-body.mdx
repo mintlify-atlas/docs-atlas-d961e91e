@@ -1,0 +1,140 @@
+---
+title: RequestBody
+description: An async sequence of ByteBuffers representing the HTTP request body, with helpers for collecting and streaming.
+---
+
+`RequestBody` is an `AsyncSequence` of `ByteBuffer`s. It can represent either a fully buffered body (from a `ByteBuffer`) or a streaming body arriving over the network.
+
+```swift
+public struct RequestBody: Sendable, AsyncSequence {
+    public typealias Element = ByteBuffer
+}
+```
+
+---
+
+## Initializers
+
+### init(buffer:)
+
+Creates a `RequestBody` from an already-buffered `ByteBuffer`. Useful in tests and when constructing requests programmatically.
+
+```swift
+public init(buffer: ByteBuffer)
+```
+
+### init(asyncSequence:)
+
+Creates a `RequestBody` from any `AsyncSequence` of `ByteBuffer`s.
+
+```swift
+public init<AS: AsyncSequence & Sendable>(asyncSequence: AS)
+where AS.Element == ByteBuffer, AS.AsyncIterator: _HB_SendableMetatype
+```
+
+### makeStream()
+
+Creates a streaming `RequestBody` and a `Source` used to write chunks into it. Use this when you need to feed data into a `RequestBody` from outside a handler.
+
+```swift
+public static func makeStream() -> (RequestBody, Source)
+```
+
+The returned `Source` supports back-pressure and must be finished by calling `source.finish()` or `source.finish(error)`.
+
+---
+
+## Collecting the body
+
+### Request.collectBody(upTo:)
+
+The recommended way to read the entire body in a handler. Collects all chunks into one `ByteBuffer` and stores the result back on the request.
+
+```swift
+public mutating func collectBody(upTo maxSize: Int) async throws -> ByteBuffer
+```
+
+```swift
+router.post("upload") { request, context in
+    var request = request
+    let body = try await request.collectBody(upTo: 10 * 1024 * 1024) // 10 MB limit
+    return "Received \(body.readableBytes) bytes"
+}
+```
+
+### body.collect(upTo:)
+
+Collects the body without storing it back on the request. Use this when the buffered data is needed only within the current scope.
+
+```swift
+let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+let text = String(buffer: buffer)
+```
+
+<Warning>
+  Always pass a reasonable `maxSize` to avoid unbounded memory growth from large or malicious request bodies.
+</Warning>
+
+---
+
+## Streaming the body
+
+Because `RequestBody` is an `AsyncSequence`, you can iterate it chunk by chunk:
+
+```swift
+router.post("stream") { request, context in
+    var totalBytes = 0
+    for try await chunk in request.body {
+        totalBytes += chunk.readableBytes
+        // process each chunk without buffering the whole body
+    }
+    return "Streamed \(totalBytes) bytes"
+}
+```
+
+<Note>
+  `RequestBody` backed by a live network connection is a unicast sequence — you can only create one iterator from it. Creating a second iterator returns an empty sequence in release builds and triggers an assertion failure in debug builds.
+</Note>
+
+---
+
+## Reading as a string
+
+After collecting, convert the `ByteBuffer` to `String`:
+
+```swift
+var request = request
+let buffer = try await request.collectBody(upTo: 1024 * 1024)
+let text = String(buffer: buffer)
+```
+
+---
+
+## Source
+
+`RequestBody.Source` is used with `makeStream()` to write chunks into a streaming body from a producer.
+
+```swift
+public final class Source: Sendable {
+    // Yield a ByteBuffer to the stream (back-pressure aware)
+    public func yield(_ element: ByteBuffer) async
+
+    // Signal that no more data will be written
+    public func finish()
+
+    // Signal an error
+    public func finish(_ error: any Error)
+}
+```
+
+`yield(_:)` respects back-pressure: it suspends the producer if the consumer is not keeping up.
+
+```swift
+let (body, source) = RequestBody.makeStream()
+Task {
+    await source.yield(ByteBuffer(string: "chunk 1"))
+    await source.yield(ByteBuffer(string: "chunk 2"))
+    source.finish()
+}
+// pass `body` to a Request or consume it elsewhere
+```

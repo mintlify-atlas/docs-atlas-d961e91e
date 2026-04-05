@@ -1,0 +1,197 @@
+---
+title: FileMiddleware
+description: Middleware that serves static files from a directory when the router returns a 404.
+---
+
+`FileMiddleware<Context, Provider>` intercepts `404 Not Found` errors from the router and attempts to serve a static file whose path matches the request URI. It supports `GET` and `HEAD` requests, range requests, ETag-based caching, and configurable `Cache-Control` headers.
+
+```swift
+@available(macOS 14, iOS 17, tvOS 17, *)
+public struct FileMiddleware<Context: RequestContext, Provider: FileProvider>: RouterMiddleware
+where Provider.FileAttributes: FileMiddlewareFileAttributes
+```
+
+---
+
+## Initializers
+
+### Default initializer (LocalFileSystem)
+
+Serves files from a local directory using `LocalFileSystem` as the file provider.
+
+```swift
+public init(
+    _ rootFolder: String = "public",
+    urlBasePath: String? = nil,
+    cacheControl: CacheControl = .init([]),
+    searchForIndexHtml: Bool = false,
+    threadPool: NIOThreadPool = NIOThreadPool.singleton,
+    logger: Logger = Logger(label: "FileMiddleware")
+) where Provider == LocalFileSystem
+```
+
+<ParamField path="rootFolder" type="String" default='"public"'>
+  The local directory from which files are served. Paths in the request URI are resolved relative to this folder.
+</ParamField>
+
+<ParamField path="urlBasePath" type="String?" default="nil">
+  A URL prefix to strip from the request path before looking up the file. For example, passing `"/static"` means a request for `/static/image.png` looks up `image.png` in `rootFolder`. The trailing slash is removed automatically.
+</ParamField>
+
+<ParamField path="cacheControl" type="CacheControl" default=".init([])">
+  Associates `Cache-Control` directives with media types. See [CacheControl](#cachecontrol) below.
+</ParamField>
+
+<ParamField path="searchForIndexHtml" type="Bool" default="false">
+  When `true`, requests for a directory path look for `index.html` inside that directory. A request for a directory path without a trailing slash redirects to the path with a trailing slash first.
+</ParamField>
+
+<ParamField path="threadPool" type="NIOThreadPool" default="NIOThreadPool.singleton">
+  The thread pool used for blocking file I/O. Defaults to the process-wide singleton.
+</ParamField>
+
+<ParamField path="logger" type="Logger" default='Logger(label: "FileMiddleware")'>
+  Logger used for file-serving diagnostics.
+</ParamField>
+
+### Custom file provider initializer
+
+Use this initializer when providing a custom `FileProvider` implementation.
+
+```swift
+public init(
+    fileProvider: Provider,
+    urlBasePath: String? = nil,
+    cacheControl: CacheControl = .init([]),
+    searchForIndexHtml: Bool = false
+)
+```
+
+<ParamField path="fileProvider" type="Provider" required>
+  Any type conforming to `FileProvider`. See [FileProvider protocol](#fileprovider-protocol) below.
+</ParamField>
+
+All other parameters are identical to the default initializer.
+
+---
+
+## Adding media types
+
+By default, `FileMiddleware` derives `Content-Type` from the file extension using Hummingbird's built-in media type map. You can register additional mappings.
+
+### withAdditionalMediaType(_:mappedToFileExtension:)
+
+```swift
+public func withAdditionalMediaType(
+    _ mediaType: MediaType,
+    mappedToFileExtension fileExtension: String
+) -> FileMiddleware
+```
+
+### withAdditionalMediaTypes(forFileExtensions:)
+
+```swift
+public func withAdditionalMediaTypes(
+    forFileExtensions extensionToMediaTypeMap: [String: MediaType]
+) -> FileMiddleware
+```
+
+Both methods return a new `FileMiddleware` with the additional mappings merged in. Later registrations for the same extension win.
+
+---
+
+## How it handles requests
+
+1. The middleware calls `next(request, context)` and passes the request to the router.
+2. If the router throws a `404 Not Found` error and the request method is `GET` or `HEAD`, the middleware attempts to serve a file.
+3. The request path is percent-decoded. Paths containing `..` are rejected with `400 Bad Request`.
+4. If `urlBasePath` is set, it is stripped from the start of the path.
+5. The `FileProvider` is queried for file attributes. If no file is found, the original `404` is re-thrown.
+6. If the file is a directory and `searchForIndexHtml` is `true`, the middleware looks for `index.html` inside the directory. A directory path without a trailing slash redirects permanently to the path with a trailing slash.
+7. The middleware checks `If-None-Match` and `If-Modified-Since` headers. If the file has not changed, it returns `304 Not Modified`.
+8. If a `Range` header is present (and the `If-Range` condition matches), a `206 Partial Content` response is returned. Otherwise the full file is returned with `200 OK`.
+
+---
+
+## CacheControl
+
+`CacheControl` maps media types to `Cache-Control` header directives.
+
+```swift
+public struct CacheControl: Sendable {
+    public init(_ entries: [(MediaType, [CacheControlValue])])
+}
+```
+
+`CacheControlValue` static members:
+
+| Value | Header string |
+|---|---|
+| `.noStore` | `no-store` |
+| `.noCache` | `no-cache` |
+| `.private` | `private` |
+| `.public` | `public` |
+| `.maxAge(Int)` | `max-age=N` |
+| `.mustRevalidate` | `must-revalidate` |
+| `.mustUnderstand` | `must-understand` |
+| `.noTransform` | `no-transform` |
+| `.immutable` | `immutable` |
+| `.custom(String)` | custom string |
+
+---
+
+## FileMiddlewareFileAttributes protocol
+
+File providers supply file metadata via a type conforming to this protocol.
+
+```swift
+public protocol FileMiddlewareFileAttributes {
+    var isFolder: Bool { get }
+    var size: Int { get }
+    var modificationDate: Date { get }
+}
+```
+
+---
+
+## FileProvider protocol
+
+```swift
+public protocol FileProvider: Sendable {
+    associatedtype FileAttributes
+    associatedtype FileIdentifier
+
+    func getFileIdentifier(_ path: String) -> FileIdentifier?
+    func getAttributes(id: FileIdentifier) async throws -> FileAttributes?
+    func loadFile(id: FileIdentifier, context: some RequestContext) async throws -> ResponseBody
+    func loadFile(id: FileIdentifier, range: ClosedRange<Int>, context: some RequestContext) async throws -> ResponseBody
+}
+```
+
+`LocalFileSystem` is the default conforming type used by the standard initializer.
+
+---
+
+## Example
+
+```swift
+import Hummingbird
+
+let router = Router()
+
+router.add(middleware: FileMiddleware(
+    "public",
+    urlBasePath: "/static",
+    cacheControl: CacheControl([
+        (.image, [.maxAge(86400), .public]),
+        (.text, [.noCache]),
+    ]),
+    searchForIndexHtml: true
+))
+
+router.get("api/hello") { _, _ in "world" }
+```
+
+<Note>
+  Place `FileMiddleware` after your API routes. Because middleware is applied only to routes registered after it, placing it first means it runs for all requests. The middleware only acts on `404` errors, so this is safe, but putting it last keeps your intent clear.
+</Note>

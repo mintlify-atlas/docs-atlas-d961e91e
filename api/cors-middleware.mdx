@@ -1,0 +1,120 @@
+---
+title: CORSMiddleware
+description: Middleware that adds Cross-Origin Resource Sharing (CORS) headers to responses and handles OPTIONS preflight requests.
+---
+
+`CORSMiddleware<Context>` implements the [CORS specification](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS). It inspects the `Origin` header on every request and, if present, adds the appropriate `Access-Control-*` response headers. `OPTIONS` preflight requests are handled directly and do not propagate to route handlers.
+
+```swift
+public struct CORSMiddleware<Context: RequestContext>: RouterMiddleware
+```
+
+---
+
+## AllowOrigin
+
+Controls which origins receive the `Access-Control-Allow-Origin` response header.
+
+```swift
+public enum AllowOrigin: Sendable {
+    case none
+    case all
+    case originBased
+    case custom(String)
+}
+```
+
+<ResponseField name="none" type="case">
+  No `Access-Control-Allow-Origin` header is added. Cross-origin requests are effectively denied.
+</ResponseField>
+
+<ResponseField name="all" type="case">
+  Sets `Access-Control-Allow-Origin: *`. Any origin is allowed. Cannot be combined with `allowCredentials: true`.
+</ResponseField>
+
+<ResponseField name="originBased" type="case">
+  Echoes the request's `Origin` header value back as `Access-Control-Allow-Origin`. Also adds `Vary: Origin`. Returns `nil` when the origin is `"null"`.
+</ResponseField>
+
+<ResponseField name="custom(String)" type="case">
+  Always sets `Access-Control-Allow-Origin` to the given string value.
+</ResponseField>
+
+---
+
+## Initializer
+
+```swift
+public init(
+    allowOrigin: AllowOrigin = .originBased,
+    allowHeaders: [HTTPField.Name] = [.accept, .authorization, .contentType, .origin],
+    allowMethods: [HTTPRequest.Method] = [.get, .post, .head, .options],
+    allowCredentials: Bool = false,
+    exposedHeaders: [String]? = nil,
+    maxAge: TimeAmount? = nil
+)
+```
+
+<ParamField path="allowOrigin" type="AllowOrigin" default=".originBased">
+  Determines the value of `Access-Control-Allow-Origin`. Defaults to `.originBased`, which mirrors the request origin and adds `Vary: Origin`.
+</ParamField>
+
+<ParamField path="allowHeaders" type="[HTTPField.Name]" default="[.accept, .authorization, .contentType, .origin]">
+  Headers permitted in cross-origin requests. Sent as `Access-Control-Allow-Headers`. Values are joined with `", "`.
+</ParamField>
+
+<ParamField path="allowMethods" type="[HTTPRequest.Method]" default="[.get, .post, .head, .options]">
+  HTTP methods permitted in cross-origin requests. Sent as `Access-Control-Allow-Methods`. Values are joined with `", "`.
+</ParamField>
+
+<ParamField path="allowCredentials" type="Bool" default="false">
+  When `true`, adds `Access-Control-Allow-Credentials: true`. Do not combine with `allowOrigin: .all` — browsers reject credentialed wildcard-origin responses.
+</ParamField>
+
+<ParamField path="exposedHeaders" type="[String]?" default="nil">
+  Response headers that the browser is allowed to read from a cross-origin response. Sent as `Access-Control-Expose-Headers`. `nil` omits the header.
+</ParamField>
+
+<ParamField path="maxAge" type="TimeAmount?" default="nil">
+  How long (in seconds) the browser may cache the preflight response. Sent as `Access-Control-Max-Age`. `nil` omits the header.
+</ParamField>
+
+---
+
+## Behavior
+
+### OPTIONS preflight
+
+When a request arrives with `method == .options` and an `Origin` header, `CORSMiddleware` returns a `204 No Content` response containing all configured `Access-Control-*` headers. The request does **not** propagate to the next middleware or route handler.
+
+### Normal requests
+
+For non-`OPTIONS` requests that include an `Origin` header, the middleware forwards the request, then appends `Access-Control-Allow-Origin` (and `Access-Control-Allow-Credentials` if configured) to the response. If the downstream handler throws an error, the same headers are attached to the error response via `EditedHTTPError`.
+
+Requests with no `Origin` header are passed through without modification.
+
+---
+
+## Example
+
+```swift
+import Hummingbird
+
+let router = Router()
+
+router.add(middleware: CORSMiddleware(
+    allowOrigin: .originBased,
+    allowHeaders: [.accept, .authorization, .contentType, .origin],
+    allowMethods: [.get, .post, .put, .delete, .options],
+    allowCredentials: true,
+    maxAge: .seconds(86400)
+))
+
+router.get("api/data") { _, _ in
+    return "hello"
+}
+```
+
+<Warning>
+  Using `allowOrigin: .all` together with `allowCredentials: true` is invalid per the CORS specification. Browsers will block such responses.
+</Warning>

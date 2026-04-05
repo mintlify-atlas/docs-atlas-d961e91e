@@ -1,0 +1,228 @@
+---
+title: ApplicationConfiguration
+description: Server-level configuration for bind address, backlog, TLS, and connection limits.
+---
+
+`ApplicationConfiguration` groups every server-level setting that is independent of request handling. Pass an instance to `Application(router:configuration:)` or `Application(responder:configuration:)`.
+
+```swift
+public struct ApplicationConfiguration: Sendable
+```
+
+---
+
+## Initializers
+
+### Standard init
+
+```swift
+public init(
+    address: BindAddress = .hostname(),
+    serverName: String? = nil,
+    backlog: Int = 256,
+    reuseAddress: Bool = true,
+    availableConnectionsDelegate: (any AvailableConnectionsDelegate)? = nil
+)
+```
+
+<ParamField path="address" type="BindAddress" default=".hostname()">
+  The socket address the server binds to. Defaults to `127.0.0.1:8080`. See [BindAddress](#bindaddress) below for all variants.
+</ParamField>
+
+<ParamField path="serverName" type="String?" default="nil">
+  Value sent in the `Server` response header. When `nil` the header is omitted. Also used as the logger label when no logger is provided to `Application`.
+</ParamField>
+
+<ParamField path="backlog" type="Int" default="256">
+  Maximum length of the pending-connection queue. If the queue is full, new connection attempts receive `ECONNREFUSED`. Ignored when using the Network framework on Apple platforms.
+</ParamField>
+
+<ParamField path="reuseAddress" type="Bool" default="true">
+  Allows binding to an address that is already in use. Useful during rapid restarts in development.
+</ParamField>
+
+<ParamField path="availableConnectionsDelegate" type="(any AvailableConnectionsDelegate)?" default="nil">
+  Controls whether the server accepts a new connection. Pass `MaximumAvailableConnections` to enforce a connection cap:
+
+  ```swift
+  configuration = .init(
+      availableConnectionsDelegate: MaximumAvailableConnections(maximum: 1000)
+  )
+  ```
+</ParamField>
+
+---
+
+### TLS init (Apple platforms only)
+
+Available when `Network.framework` is present (macOS, iOS, tvOS, visionOS).
+
+```swift
+public init(
+    address: BindAddress = .hostname(),
+    serverName: String? = nil,
+    reuseAddress: Bool = true,
+    availableConnectionsDelegate: (any AvailableConnectionsDelegate)? = nil,
+    tlsOptions: TSTLSOptions
+)
+```
+
+<ParamField path="tlsOptions" type="TSTLSOptions" required>
+  TLS configuration for NIO Transport Services. The `backlog` parameter is not used by the Network framework and is fixed at `256` internally.
+
+  ```swift
+  import Network
+
+  let tlsOptions = TSTLSOptions.options(
+      serverIdentity: myIdentity
+  )
+  let config = ApplicationConfiguration(
+      address: .hostname("0.0.0.0", port: 443),
+      tlsOptions: tlsOptions
+  )
+  ```
+</ParamField>
+
+<Note>
+  The `tlsOptions` property is available as `configuration.tlsOptions` on Apple platforms. It is initialized to `.none` by the standard initializer.
+</Note>
+
+---
+
+## Properties
+
+| Property | Type | Default | Description |
+|---|---|---|---|
+| `address` | `BindAddress` | `.hostname()` | Bind address for the listening socket |
+| `serverName` | `String?` | `nil` | Value for the `Server` response header |
+| `backlog` | `Int` | `256` | Pending-connection queue length |
+| `reuseAddress` | `Bool` | `true` | Allow re-binding a busy address |
+| `availableConnectionsDelegate` | `(any AvailableConnectionsDelegate)?` | `nil` | Connection-acceptance policy |
+| `tlsOptions` | `TSTLSOptions` | `.none` | TLS settings (Apple platforms only) |
+
+---
+
+## with(address:serverName:backlog:reuseAddress:)
+
+Returns a copy of the configuration with selected fields replaced. Unspecified parameters retain their current values.
+
+```swift
+public func with(
+    address: BindAddress? = nil,
+    serverName: String? = nil,
+    backlog: Int? = nil,
+    reuseAddress: Bool? = nil
+) -> Self
+```
+
+<ParamField path="address" type="BindAddress?" default="nil">
+  New bind address, or `nil` to keep the current value.
+</ParamField>
+
+<ParamField path="serverName" type="String?" default="nil">
+  New server name, or `nil` to keep the current value.
+</ParamField>
+
+<ParamField path="backlog" type="Int?" default="nil">
+  New backlog, or `nil` to keep the current value.
+</ParamField>
+
+<ParamField path="reuseAddress" type="Bool?" default="nil">
+  New `reuseAddress` flag, or `nil` to keep the current value.
+</ParamField>
+
+```swift
+let base = ApplicationConfiguration(address: .hostname("127.0.0.1", port: 8080))
+let production = base.with(
+    address: .hostname("0.0.0.0", port: 443),
+    serverName: "MyApp/1.0"
+)
+```
+
+---
+
+## BindAddress
+
+`BindAddress` specifies the socket type and address the server listens on.
+
+```swift
+public struct BindAddress: Sendable, Equatable
+```
+
+### Static constructors
+
+<ResponseField name=".hostname(_:port:)" type="BindAddress">
+  Binds to a TCP port on the given hostname or IP address.
+
+  ```swift
+  // Default: 127.0.0.1:8080
+  BindAddress.hostname()
+
+  // All interfaces, port 8080
+  BindAddress.hostname("0.0.0.0", port: 8080)
+  ```
+
+  <Expandable title="Parameters">
+    <ResponseField name="host" type="String" default="127.0.0.1">
+      IP address or hostname to bind.
+    </ResponseField>
+    <ResponseField name="port" type="Int" default="8080">
+      TCP port to listen on.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name=".unixDomainSocket(path:)" type="BindAddress">
+  Binds to a Unix domain socket at the given filesystem path. Useful for local inter-process communication or when running behind a proxy like nginx.
+
+  ```swift
+  BindAddress.unixDomainSocket(path: "/tmp/hummingbird.sock")
+  ```
+
+  <Expandable title="Parameters">
+    <ResponseField name="path" type="String" required>
+      Absolute filesystem path for the Unix socket file.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name=".nwEndpoint(_:)" type="BindAddress">
+  Binds to an `NWEndpoint`. Available on Apple platforms only (requires `Network.framework`).
+
+  ```swift
+  import Network
+  BindAddress.nwEndpoint(NWEndpoint.hostPort(host: "0.0.0.0", port: 8443))
+  ```
+</ResponseField>
+
+---
+
+## Examples
+
+<CodeGroup>
+
+```swift hostname
+let config = ApplicationConfiguration(
+    address: .hostname("0.0.0.0", port: 8080),
+    serverName: "MyAPI"
+)
+```
+
+```swift unix socket
+let config = ApplicationConfiguration(
+    address: .unixDomainSocket(path: "/run/myapp.sock"),
+    reuseAddress: true
+)
+```
+
+```swift with TLS (Apple platforms)
+import Network
+
+let config = ApplicationConfiguration(
+    address: .hostname("0.0.0.0", port: 443),
+    serverName: "MyApp",
+    tlsOptions: TSTLSOptions.options(serverIdentity: identity)
+)
+```
+
+</CodeGroup>

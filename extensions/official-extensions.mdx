@@ -1,0 +1,323 @@
+---
+title: "Official extensions"
+description: "An overview of all official extensions for the Hummingbird Swift HTTP framework, both built-in and in separate repositories."
+---
+
+Hummingbird's core is intentionally minimal. Additional capabilities are provided through extensions — some ship inside the main package, others live in dedicated repositories.
+
+## Built-in extensions
+
+These targets are part of the [`hummingbird`](https://github.com/hummingbird-project/hummingbird) package and require no extra dependency declaration beyond the package itself.
+
+<CardGroup cols={2}>
+  <Card title="HummingbirdRouter" icon="route" href="/extensions/router-builder">
+    A result builder DSL for defining routes declaratively. Provides `RouterBuilder`, `RouteGroup`, `RouterController`, and context transforms.
+  </Card>
+  <Card title="HummingbirdTLS" icon="lock">
+    TLS support for Hummingbird servers. Wraps SwiftNIO SSL to terminate HTTPS connections.
+  </Card>
+  <Card title="HummingbirdHTTP2" icon="arrow-up-right-dots">
+    HTTP/2 upgrade support. Enables multiplexed streams over a single connection.
+  </Card>
+  <Card title="HummingbirdTesting" icon="flask-conical">
+    Helper types and utilities for writing unit and integration tests against a Hummingbird application without starting a live server.
+  </Card>
+</CardGroup>
+
+Add a built-in extension by including its product name in your target dependencies:
+
+```swift Package.swift
+.executableTarget(
+    name: "MyApp",
+    dependencies: [
+        .product(name: "Hummingbird", package: "hummingbird"),
+        .product(name: "HummingbirdRouter", package: "hummingbird"),
+        .product(name: "HummingbirdTLS", package: "hummingbird"),
+        .product(name: "HummingbirdHTTP2", package: "hummingbird"),
+        .product(name: "HummingbirdTesting", package: "hummingbird"),
+    ]
+)
+```
+
+---
+
+## Extensions in separate repositories
+
+The extensions below are maintained by the Hummingbird project team but live in their own repositories. Add each as a separate package dependency.
+
+<CardGroup cols={2}>
+  <Card title="HummingbirdAuth" icon="shield-check" href="https://github.com/hummingbird-project/hummingbird-auth">
+    Authentication framework with middleware, session management, and bearer token support.
+  </Card>
+  <Card title="HummingbirdFluent" icon="database" href="https://github.com/hummingbird-project/hummingbird-fluent">
+    Integration with Vapor's FluentKit ORM for SQL and NoSQL databases.
+  </Card>
+  <Card title="HummingbirdRedis" icon="bolt" href="https://github.com/hummingbird-project/hummingbird-redis">
+    Redis support via RediStack, including connection pooling and Pub/Sub.
+  </Card>
+  <Card title="HummingbirdWebSocket" icon="wifi" href="https://github.com/hummingbird-project/hummingbird-websocket">
+    Full-duplex WebSocket connections with upgrade handling built in.
+  </Card>
+  <Card title="HummingbirdLambda" icon="cloud" href="https://github.com/hummingbird-project/hummingbird-lambda">
+    Deploy Hummingbird applications to AWS Lambda using the Swift Lambda Runtime.
+  </Card>
+  <Card title="Jobs (swift-jobs)" icon="list-checks" href="https://github.com/hummingbird-project/swift-jobs">
+    A job queue framework for background processing with multiple driver backends.
+  </Card>
+  <Card title="Mustache (swift-mustache)" icon="file-code" href="https://github.com/hummingbird-project/swift-mustache">
+    A Mustache templating engine for rendering HTML responses server-side.
+  </Card>
+</CardGroup>
+
+---
+
+## Extension details
+
+<AccordionGroup>
+
+  <Accordion title="HummingbirdAuth">
+    HummingbirdAuth provides an authentication framework including middleware, session storage, and bearer token verification. It integrates cleanly with the Hummingbird middleware stack.
+
+    **Repository:** https://github.com/hummingbird-project/hummingbird-auth
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird-auth.git", from: "2.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "HummingbirdAuth", package: "hummingbird-auth"),
+            ]
+        )
+    ]
+    ```
+
+    ```swift
+    import HummingbirdAuth
+
+    // Apply authentication middleware to a route group
+    router.group("api")
+        .add(middleware: BearerAuthenticator())
+        .get("profile") { request, context in
+            let user = try context.requireIdentity()
+            return user.profile
+        }
+    ```
+  </Accordion>
+
+  <Accordion title="HummingbirdFluent">
+    HummingbirdFluent integrates Vapor's [FluentKit](https://github.com/vapor/fluent-kit) ORM, giving you model definitions, migrations, and query builders against SQL and NoSQL databases without the rest of the Vapor stack.
+
+    **Repository:** https://github.com/hummingbird-project/hummingbird-fluent
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird-fluent.git", from: "2.0.0"),
+        .package(url: "https://github.com/vapor/fluent-sqlite-driver.git", from: "4.0.0"),
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "HummingbirdFluent", package: "hummingbird-fluent"),
+                .product(name: "FluentSQLiteDriver", package: "fluent-sqlite-driver"),
+            ]
+        )
+    ]
+    ```
+
+    ```swift
+    import HummingbirdFluent
+    import FluentSQLiteDriver
+
+    let fluent = Fluent(logger: logger)
+    fluent.databases.use(.sqlite(.file("db.sqlite")), as: .sqlite)
+    fluent.migrations.add(CreateTodo())
+
+    var app = Application(router: router)
+    app.addServices(fluent)
+    try await app.runService()
+    ```
+  </Accordion>
+
+  <Accordion title="HummingbirdRedis">
+    HummingbirdRedis provides Redis connectivity via [RediStack](https://github.com/swift-server/RediStack), including a connection pool and support for Pub/Sub.
+
+    **Repository:** https://github.com/hummingbird-project/hummingbird-redis
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird-redis.git", from: "2.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "HummingbirdRedis", package: "hummingbird-redis"),
+            ]
+        )
+    ]
+    ```
+
+    ```swift
+    import HummingbirdRedis
+
+    let redis = try RedisConnectionPoolService(
+        .init(hostname: "localhost", port: 6379),
+        pool: .init(maximumConnectionCount: .maximumPreservedConnections(16)),
+        logger: logger
+    )
+
+    var app = Application(router: router)
+    app.addServices(redis)
+    ```
+  </Accordion>
+
+  <Accordion title="HummingbirdWebSocket">
+    HummingbirdWebSocket adds WebSocket upgrade handling. Routes can be upgraded from HTTP to a persistent full-duplex connection, with inbound and outbound message streaming.
+
+    **Repository:** https://github.com/hummingbird-project/hummingbird-websocket
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
+            ]
+        )
+    ]
+    ```
+
+    ```swift
+    import HummingbirdWebSocket
+
+    router.ws("chat") { request, ws in
+        for try await message in ws.inbound {
+            try await ws.write(.text("Echo: \(message)"))
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="HummingbirdLambda">
+    HummingbirdLambda allows you to run a Hummingbird application as an AWS Lambda function, using the [Swift AWS Lambda Runtime](https://github.com/swift-server/swift-aws-lambda-runtime). HTTP events from API Gateway are translated into standard Hummingbird requests.
+
+    **Repository:** https://github.com/hummingbird-project/hummingbird-lambda
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird-lambda.git", from: "2.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyFunction",
+            dependencies: [
+                .product(name: "HummingbirdLambda", package: "hummingbird-lambda"),
+            ]
+        )
+    ]
+    ```
+
+    ```swift
+    import HummingbirdLambda
+
+    @main
+    struct MyHandler: APIGatewayLambdaFunction {
+        init(context: LambdaInitializationContext) {}
+
+        func buildResponder() -> some HTTPResponder<BasicLambdaRequestContext> {
+            let router = Router(context: BasicLambdaRequestContext.self)
+            router.get("hello") { _, _ in "Hello from Lambda!" }
+            return router.buildResponder()
+        }
+    }
+    ```
+
+    <Tip>
+      Build your Lambda function for Linux using `swift build --swift-sdk aarch64-swift-linux-musl` and package the binary as a zip for deployment.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="Jobs (swift-jobs)">
+    `swift-jobs` is a job queue framework for deferring and processing background work. It supports multiple backend drivers and integrates with the Swift Service Lifecycle.
+
+    **Repository:** https://github.com/hummingbird-project/swift-jobs
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/swift-jobs.git", from: "1.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "Jobs", package: "swift-jobs"),
+            ]
+        )
+    ]
+    ```
+
+    ```swift
+    import Jobs
+
+    struct SendEmailJob: JobParameters {
+        static let jobName = "SendEmail"
+        let recipient: String
+        let subject: String
+    }
+
+    // Register and enqueue
+    let jobQueue = JobQueue(.memory, logger: logger)
+    jobQueue.registerJob(parameters: SendEmailJob.self) { parameters, context in
+        try await emailService.send(to: parameters.recipient, subject: parameters.subject)
+    }
+
+    var app = Application(router: router)
+    app.addServices(jobQueue)
+    ```
+  </Accordion>
+
+  <Accordion title="Mustache (swift-mustache)">
+    `swift-mustache` is a Mustache templating engine that lets you render HTML (or any text) responses from template files. It supports partials, lambdas, and the full Mustache specification.
+
+    **Repository:** https://github.com/hummingbird-project/swift-mustache
+
+    ```swift Package.swift
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/swift-mustache.git", from: "2.0.0")
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "Mustache", package: "swift-mustache"),
+            ]
+        )
+    ]
+    ```
+
+    ```swift
+    import Mustache
+
+    let library = MustacheLibrary("templates/")
+    let context = ["name": "world", "items": ["one", "two", "three"]]
+    let rendered = try library.render(context, withTemplate: "hello")
+    ```
+
+    Template file `templates/hello.mustache`:
+
+    ```text templates/hello.mustache
+    Hello, {{name}}!
+    {{#items}}
+    - {{.}}
+    {{/items}}
+    ```
+  </Accordion>
+
+</AccordionGroup>

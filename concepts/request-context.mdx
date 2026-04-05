@@ -1,0 +1,205 @@
+---
+title: "Request context"
+description: "Learn how RequestContext carries per-request metadata through the middleware chain, and how to create custom contexts with additional fields."
+---
+
+Every route handler and middleware receives a second argument alongside the `Request`: the _request context_. The context is a strongly typed, per-request metadata container. It carries state from the moment the connection is accepted all the way through to the route handler.
+
+## RequestContext protocol
+
+```swift
+public protocol RequestContext: InitializableFromSource, RequestContextSource {
+    associatedtype Source: RequestContextSource = ApplicationRequestContextSource
+    associatedtype Decoder: RequestDecoder = JSONDecoder
+    associatedtype Encoder: ResponseEncoder = JSONEncoder
+
+    /// Required storage provided by the framework
+    var coreContext: CoreRequestContextStorage { get set }
+
+    /// Maximum body size for decoding (default: 2 MB)
+    var maxUploadSize: Int { get }
+
+    var requestDecoder: Decoder { get }
+    var responseEncoder: Encoder { get }
+}
+```
+
+The protocol extends `InitializableFromSource<Source>`, which means every context must be constructable from a `Source`:
+
+```swift
+public protocol InitializableFromSource<Source>: Sendable {
+    associatedtype Source
+    init(source: Source)
+}
+```
+
+For contexts created by `Application`, `Source` is `ApplicationRequestContextSource`, which holds the NIO `Channel` and a per-request `Logger`.
+
+## CoreRequestContextStorage
+
+`CoreRequestContextStorage` is the framework-required storage that every context must embed and expose as `coreContext`:
+
+```swift
+public struct CoreRequestContextStorage: Sendable {
+    /// Per-request logger (includes a unique request ID)
+    var logger: Logger
+    /// The matched endpoint path pattern (e.g. "/users/:id")
+    public var endpointPath: EndpointPath
+    /// Parameters extracted from the URI (e.g. ["id": "42"])
+    public var parameters: Parameters
+
+    public init(source: some RequestContextSource) {
+        self.logger = source.logger
+        self.endpointPath = .init()
+        self.parameters = .init()
+    }
+}
+```
+
+The protocol extension on `RequestContext` exposes these as computed properties:
+
+```swift
+extension RequestContext {
+    public var logger: Logger { get set }           // via coreContext.logger
+    public var endpointPath: String? { ... }        // via coreContext.endpointPath
+    public var parameters: Parameters { ... }       // via coreContext.parameters
+    public var id: String { ... }                   // from the logger metadata
+}
+```
+
+## BasicRequestContext
+
+`BasicRequestContext` is the default context type used when you create a `Router()` without specifying a context:
+
+```swift
+public struct BasicRequestContext: RequestContext {
+    public var coreContext: CoreRequestContextStorage
+
+    public init(source: Source) {
+        self.coreContext = .init(source: source)
+    }
+}
+```
+
+It has no extra fields and works for most simple applications.
+
+## Creating a custom request context
+
+Add your own fields to the context by defining a struct that conforms to `RequestContext`:
+
+```swift
+import Hummingbird
+
+struct AuthenticatedRequestContext: RequestContext {
+    // Required by the protocol
+    var coreContext: CoreRequestContextStorage
+
+    // Your custom per-request data
+    var user: User?
+
+    init(source: Source) {
+        self.coreContext = .init(source: source)
+        self.user = nil
+    }
+}
+```
+
+Then create a `Router` typed to your context:
+
+```swift
+let router = Router(context: AuthenticatedRequestContext.self)
+```
+
+Route handlers receive your context type directly:
+
+```swift
+router.get("profile") { request, context in
+    guard let user = context.user else {
+        throw HTTPError(.unauthorized)
+    }
+    return "Hello, \(user.name)"
+}
+```
+
+Middleware can populate the custom fields before the handler runs:
+
+```swift
+struct AuthMiddleware: RouterMiddleware {
+    typealias Context = AuthenticatedRequestContext
+
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        var context = context
+        let token = request.headers[.authorization]
+        context.user = try await verifyToken(token)
+        return try await next(request, context)
+    }
+}
+```
+
+## How context flows through the application
+
+<Steps>
+  <Step title="Connection accepted">
+    `Application.run()` creates an `ApplicationRequestContextSource` from the NIO channel and a per-request logger stamped with a unique request ID.
+  </Step>
+  <Step title="Context instantiated">
+    The context is initialized via `Context(source: applicationRequestContextSource)`. This happens once per request.
+  </Step>
+  <Step title="Middleware chain">
+    The context (and request) travel through each registered middleware. Middleware may read or mutate the context before calling `next`.
+  </Step>
+  <Step title="Route handler">
+    The final handler receives the fully decorated context. Path parameters and logger are available via `context.parameters` and `context.logger`.
+  </Step>
+</Steps>
+
+## ChildRequestContext for context transformation in route groups
+
+Sometimes a sub-section of your API needs a richer context type. `ChildRequestContext` lets you transform the parent context into a child context at a group boundary:
+
+```swift
+public protocol ChildRequestContext<ParentContext>: RequestContext
+where Source == Never {
+    associatedtype ParentContext: RequestContext
+    init(context: ParentContext) throws
+}
+```
+
+<Steps>
+  <Step title="Define the child context">
+    ```swift
+    struct AdminRequestContext: ChildRequestContext {
+        typealias ParentContext = BasicRequestContext
+
+        var coreContext: CoreRequestContextStorage
+        var adminUser: AdminUser
+
+        init(context: BasicRequestContext) throws {
+            self.coreContext = context.coreContext
+            guard let user = AdminUser(context: context) else {
+                throw HTTPError(.forbidden)
+            }
+            self.adminUser = user
+        }
+    }
+    ```
+  </Step>
+  <Step title="Create a group with the child context">
+    ```swift
+    router
+        .group("admin", context: AdminRequestContext.self)
+        .get("dashboard") { request, context in
+            // context is AdminRequestContext here
+            return "Hello, \(context.adminUser.name)"
+        }
+    ```
+  </Step>
+</Steps>
+
+If the `init(context:)` throws, the error propagates back up the middleware stack as a normal response error — the route handler is never called.
+
+<Note>A `ChildRequestContext` cannot be constructed from an `ApplicationRequestContextSource` directly (its `Source` is typed `Never`). It can only be constructed from its `ParentContext`.</Note>

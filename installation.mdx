@@ -1,0 +1,202 @@
+---
+title: Installation
+description: Add Hummingbird and its optional library targets to a Swift package.
+---
+
+Hummingbird is distributed as a Swift package via the Swift Package Manager. This page covers system requirements, how to add the package to an existing project, and what each available library target provides.
+
+## Requirements
+
+| Platform | Minimum version |
+|---|---|
+| macOS | 11.0+ (runtime: macOS 14 for `Application`) |
+| iOS / Mac Catalyst | 15.0+ (runtime: iOS 17 for `Application`) |
+| tvOS | 15.0+ |
+| visionOS | 1.0+ |
+| Linux | Any Swift 5.10-supported distribution |
+| Swift | 5.10+ |
+
+<Note>
+  The `Application` type and `ApplicationProtocol` carry `@available(macOS 14, iOS 17, tvOS 17, *)` annotations. If you target older OS versions, you can use `HummingbirdCore` directly or wrap `Application` in an availability check.
+</Note>
+
+## Adding the package
+
+<CodeGroup>
+
+```swift Package.swift
+// Add to the dependencies array in Package.swift:
+dependencies: [
+    .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0")
+],
+// Then add product dependencies to your target:
+targets: [
+    .executableTarget(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "Hummingbird", package: "hummingbird"),
+        ]
+    ),
+]
+```
+
+```bash swift package CLI
+# Run these two commands from your package root, replacing MyApp with your target name:
+swift package add-dependency https://github.com/hummingbird-project/hummingbird.git --from 2.0.0
+swift package add-target-dependency Hummingbird MyApp --package hummingbird
+```
+
+</CodeGroup>
+
+After adding the dependency, run `swift package resolve` to fetch the package, or let `swift build` / `swift run` do it automatically on next invocation.
+
+## Available library targets
+
+The Hummingbird package exposes six library products. You only pay the compile-time and binary cost for the ones you explicitly depend on.
+
+<AccordionGroup>
+
+<Accordion title="Hummingbird" defaultOpen={true}>
+
+The main library. Import this in any target that defines routes, middleware, or application entry points.
+
+**Provides:** `Application`, `ApplicationProtocol`, `Router`, `RouterGroup`, `MiddlewareProtocol`, `RouterMiddleware`, `Request`, `Response`, `RequestContext`, `BasicRequestContext`, `ApplicationConfiguration`, `HTTPError`, `Parameters`, built-in middleware (`LogRequestsMiddleware`, `MetricsMiddleware`, `TracingMiddleware`, `CORSMiddleware`, `FileMiddleware`), and the `Environment` helper.
+
+**Depends on:** `HummingbirdCore`, SwiftNIO, swift-log, swift-metrics, swift-distributed-tracing, swift-http-types, swift-async-algorithms, swift-service-lifecycle.
+
+```swift Package.swift
+.product(name: "Hummingbird", package: "hummingbird")
+```
+
+</Accordion>
+
+<Accordion title="HummingbirdCore">
+
+The low-level server primitives that `Hummingbird` builds on. Use this target directly if you are building a custom framework layer, a non-HTTP protocol handler, or need fine-grained control over the channel pipeline without pulling in the router.
+
+**Provides:** `HTTPServerBuilder`, `ServerConfiguration`, `BindAddress`, `HTTPResponder`, `ResponseWriter`, `FlatDictionary`, and the core SwiftNIO channel handlers for HTTP/1.1.
+
+```swift Package.swift
+.product(name: "HummingbirdCore", package: "hummingbird")
+```
+
+</Accordion>
+
+<Accordion title="HummingbirdRouter">
+
+An alternative router that uses Swift result builders to declare routes and middleware in a structured, declarative style. Use this when you prefer compile-time route composition over the imperative `router.get(...)` API.
+
+**Provides:** `RouterBuilder` and associated result builder types for composing routes and middleware groups as a Swift DSL.
+
+**Depends on:** `Hummingbird`.
+
+```swift Package.swift
+.product(name: "HummingbirdRouter", package: "hummingbird")
+```
+
+</Accordion>
+
+<Accordion title="HummingbirdTLS">
+
+Adds TLS support to the HTTP server by wrapping `swift-nio-ssl`. Import this target and configure `HTTPServerBuilder` with a TLS channel to terminate HTTPS connections.
+
+**Provides:** TLS channel configuration and the `NIOSSLContext`-backed server builder extension.
+
+**Depends on:** `HummingbirdCore`, `swift-nio-ssl`.
+
+```swift Package.swift
+.product(name: "HummingbirdTLS", package: "hummingbird")
+```
+
+</Accordion>
+
+<Accordion title="HummingbirdHTTP2">
+
+Adds HTTP/2 support via `swift-nio-http2`. Combine with `HummingbirdTLS` to serve HTTP/2 over TLS with ALPN negotiation, or use it for h2c (cleartext HTTP/2) connections. Existing route handlers require no changes.
+
+**Provides:** HTTP/2 channel builder extensions for `HTTPServerBuilder`.
+
+**Depends on:** `HummingbirdCore`, `swift-nio-http2`, `swift-nio-ssl`.
+
+```swift Package.swift
+.product(name: "HummingbirdHTTP2", package: "hummingbird")
+```
+
+</Accordion>
+
+<Accordion title="HummingbirdTesting">
+
+Test helpers that allow you to send requests directly to your router without binding a real TCP socket. This makes unit tests fast, isolated, and runnable in CI without elevated privileges.
+
+**Provides:** `TestApplication`, which routes requests in-process, and extensions for building `HTTPRequest` values and asserting on responses.
+
+**Depends on:** `Hummingbird`, `async-http-client`, `swift-nio`, `swift-nio-ssl`.
+
+```swift Package.swift
+// Add to a .testTarget, not a production target:
+.product(name: "HummingbirdTesting", package: "hummingbird")
+```
+
+<Warning>
+  Add `HummingbirdTesting` only to test targets. It pulls in `AsyncHTTPClient` and embedded NIO primitives that are not appropriate for production binaries.
+</Warning>
+
+</Accordion>
+
+</AccordionGroup>
+
+## The ConfigurationSupport trait
+
+The Hummingbird package declares a Swift package trait named `ConfigurationSupport`, which is **enabled by default**. When active, it integrates [swift-configuration](https://github.com/apple/swift-configuration) into `HummingbirdCore`, `Hummingbird`, `HummingbirdTLS`, and `HummingbirdHTTP2`, enabling structured configuration loading from environment variables, config files, or other sources.
+
+To disable the trait — for example to reduce the dependency footprint on a platform that does not support it — you can opt out when declaring the package dependency:
+
+```swift Package.swift
+.package(
+    url: "https://github.com/hummingbird-project/hummingbird.git",
+    from: "2.0.0",
+    traits: []   // disables ConfigurationSupport
+)
+```
+
+<Info>
+  Package traits require Swift 6.2 or later (swift-tools-version 6.2). If your toolchain is older, `ConfigurationSupport` is always included and cannot be disabled.
+</Info>
+
+## Adding multiple targets
+
+To use TLS and HTTP/2 alongside the main library, add all three products to the same target:
+
+```swift Package.swift
+dependencies: [
+    .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0")
+],
+targets: [
+    .executableTarget(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "Hummingbird", package: "hummingbird"),
+            .product(name: "HummingbirdTLS", package: "hummingbird"),
+            .product(name: "HummingbirdHTTP2", package: "hummingbird"),
+        ]
+    ),
+    .testTarget(
+        name: "MyAppTests",
+        dependencies: [
+            .product(name: "Hummingbird", package: "hummingbird"),
+            .product(name: "HummingbirdTesting", package: "hummingbird"),
+        ]
+    ),
+]
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="play" href="/quickstart">
+    Write your first route and run a Hummingbird server locally.
+  </Card>
+  <Card title="Introduction" icon="book" href="/introduction">
+    Understand how Application, Router, Middleware, and handlers fit together.
+  </Card>
+</CardGroup>

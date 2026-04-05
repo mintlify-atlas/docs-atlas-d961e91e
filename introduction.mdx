@@ -1,0 +1,118 @@
+---
+title: Introduction
+description: Hummingbird is a lightweight, flexible, modern HTTP server framework written in Swift, built on top of SwiftNIO.
+---
+
+Hummingbird is a lightweight, flexible, modern web application framework that runs on top of a SwiftNIO-based server implementation. It is designed to require the minimum number of dependencies while providing everything you need to build fast, production-ready HTTP services in Swift.
+
+```swift
+import Hummingbird
+
+let router = Router()
+router.get("hello") { request, _ -> String in
+    return "Hello"
+}
+let app = Application(
+    router: router,
+    configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+)
+try await app.runService()
+```
+
+## Why Hummingbird
+
+Hummingbird occupies a deliberate position in the Swift server ecosystem: minimal by default, extensible by design. Rather than bundling every possible feature into the core library, it provides a focused foundation that you compose upward.
+
+- **Built on SwiftNIO.** All I/O is non-blocking and event-driven. Hummingbird inherits SwiftNIO's battle-tested concurrency model and transport layer, giving you low-latency networking without extra configuration.
+- **Native async/await.** Route handlers, middleware, and lifecycle hooks are all expressed with Swift's structured concurrency primitives. There are no callback pyramids or custom future types to learn.
+- **Minimal dependencies.** The core `Hummingbird` target pulls in only what it needs — SwiftNIO, swift-log, swift-metrics, swift-http-types, and swift-service-lifecycle. You add more only when you need them.
+- **Composable architecture.** Middleware, router groups, and request context types are all protocol-based. You assemble behaviour by composing small, focused pieces rather than subclassing a monolithic framework type.
+- **Swift Server Workgroup incubated.** Hummingbird is an officially incubated project in the SSWG ecosystem, with active community maintenance and a clear contribution process.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Trie-based router" icon="route">
+    Routes are stored in a trie for O(log n) matching. Supports wildcards (`*`), named parameters (`:id`), and recursive catch-all patterns (`**`) out of the box.
+  </Card>
+  <Card title="Composable middleware" icon="layers">
+    Middleware implements `RouterMiddleware` and can intercept requests before they reach a handler or transform responses on the way out. Middleware is scoped per route group, not globally.
+  </Card>
+  <Card title="Structured concurrency" icon="bolt">
+    `Application` conforms to `Service` from swift-service-lifecycle. `runService()` manages graceful shutdown on `SIGINT`/`SIGTERM` automatically.
+  </Card>
+  <Card title="Flexible request context" icon="box">
+    Route handlers receive a strongly-typed `RequestContext` alongside the `Request`. You can extend the context per route group to carry auth tokens, database handles, or any other per-request state.
+  </Card>
+  <Card title="Built-in encoding/decoding" icon="code">
+    Handlers can return any type conforming to `ResponseGenerator` — `String`, `ByteBuffer`, `HTTPResponse.Status`, or a `Codable` struct. Hummingbird negotiates the response body automatically.
+  </Card>
+  <Card title="TLS and HTTP/2" icon="lock">
+    The optional `HummingbirdTLS` and `HummingbirdHTTP2` targets add TLS termination and HTTP/2 upgrade support with zero changes to your route handlers.
+  </Card>
+  <Card title="Observability built in" icon="chart-bar">
+    The core target integrates swift-log, swift-metrics, and swift-distributed-tracing. `LogRequestsMiddleware`, `MetricsMiddleware`, and `TracingMiddleware` are ready to use with any compatible backend.
+  </Card>
+  <Card title="Testable by design" icon="flask">
+    `HummingbirdTesting` provides in-process test helpers that send requests directly to your router without binding a real TCP socket, making unit tests fast and deterministic.
+  </Card>
+</CardGroup>
+
+## Architecture overview
+
+A Hummingbird application is assembled from four layered concepts:
+
+### Application
+
+`Application` is the top-level entry point. It holds a reference to your router, server configuration (bind address, port, TLS options), and any additional `Service` instances that should be managed alongside the HTTP server. Calling `runService()` starts a `ServiceGroup` that coordinates graceful startup and shutdown.
+
+```swift
+let app = Application(
+    router: router,
+    configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+)
+try await app.runService()
+```
+
+### Router
+
+`Router` maps incoming requests to handlers using a trie. You register handlers for specific HTTP methods and path patterns. The router also holds a `MiddlewareGroup` that wraps all handlers registered after each `add(middleware:)` call.
+
+```swift
+let router = Router()
+router.get("users/:id") { request, context -> String in
+    let id = try context.parameters.require("id")
+    return "User \(id)"
+}
+```
+
+### Middleware
+
+Middleware sits between the router and your handler. Each middleware receives the `Request` and `Context`, can modify them, call `next` to proceed down the chain, and then modify the resulting `Response` before returning it. Middleware that does not call `next` short-circuits the chain entirely.
+
+```swift
+func handle(
+    _ request: Request,
+    context: Context,
+    next: (Request, Context) async throws -> Response
+) async throws -> Response {
+    let response = try await next(request, context)
+    // modify response...
+    return response
+}
+```
+
+### Handler
+
+A route handler is any `async throws` closure — or a type conforming to `HTTPResponder` — that accepts a `Request` and `Context` and returns something conforming to `ResponseGenerator`. Handlers are the innermost layer; by the time a request reaches them all middleware has already run.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="play" href="/quickstart">
+    Create a Swift package, add Hummingbird, and run your first server in under five minutes.
+  </Card>
+  <Card title="Installation" icon="package" href="/installation">
+    Detailed instructions for adding Hummingbird and its optional library targets to an existing package.
+  </Card>
+</CardGroup>

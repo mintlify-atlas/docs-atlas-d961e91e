@@ -1,0 +1,222 @@
+---
+title: "Middleware"
+description: "Learn how Hummingbird middleware chains intercept requests and responses, and how to write your own middleware."
+---
+
+Middleware sits between the server and your route handlers. Each middleware receives a request, can modify it, pass it on to the next layer, inspect the response, and optionally short-circuit the chain by returning early.
+
+## Protocols
+
+Hummingbird defines two layered middleware protocols:
+
+```swift
+/// Generic middleware for any input/output/context triple
+public protocol MiddlewareProtocol<Input, Output, Context>: Sendable {
+    func handle(
+        _ input: Input,
+        context: Context,
+        next: (Input, Context) async throws -> Output
+    ) async throws -> Output
+}
+
+/// Middleware specialised for HTTP: Input == Request, Output == Response
+public protocol RouterMiddleware<Context>: MiddlewareProtocol
+where Input == Request, Output == Response {}
+```
+
+Most application middleware conforms to `RouterMiddleware`.
+
+## How middleware chains work
+
+When a request arrives, the framework calls each middleware in registration order. Each middleware receives a `next` closure it must call (or deliberately skip) to advance the chain. The last `next` in the chain is the matched route handler.
+
+```
+Request → Middleware A → Middleware B → Route handler
+                                          ↓
+Response ← Middleware A ← Middleware B ←──┘
+```
+
+This means you can run code both before and after the route handler within a single `handle` function.
+
+## Writing middleware
+
+### Pass-through middleware (inspect and continue)
+
+```swift
+struct LogRequestsMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        // Before the handler runs
+        context.logger.info("→ \(request.method) \(request.uri.path)")
+
+        let response = try await next(request, context)
+
+        // After the handler returns
+        context.logger.info("← \(response.status)")
+        return response
+    }
+}
+```
+
+### Short-circuit middleware (return early without calling next)
+
+```swift
+struct MaintenanceModeMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+
+    let isEnabled: Bool
+
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        guard !isEnabled else {
+            // Skip the rest of the chain entirely
+            return Response(
+                status: .serviceUnavailable,
+                body: .init(byteBuffer: ByteBuffer(string: "Under maintenance"))
+            )
+        }
+        return try await next(request, context)
+    }
+}
+```
+
+### Modifying the request before passing it on
+
+```swift
+struct RequestIDMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        var request = request
+        var context = context
+        context.logger[metadataKey: "requestId"] = "\(UUID())"
+        return try await next(request, context)
+    }
+}
+```
+
+### Modifying the response after next returns
+
+```swift
+struct CORSMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        var response = try await next(request, context)
+        response.headers[.accessControlAllowOrigin] = "*"
+        return response
+    }
+}
+```
+
+## Adding middleware to a router
+
+### add(middleware:)
+
+Register a single middleware instance:
+
+```swift
+router.add(middleware: LogRequestsMiddleware())
+```
+
+`add(middleware:)` returns `Self`, so you can chain calls:
+
+```swift
+router
+    .add(middleware: LogRequestsMiddleware())
+    .add(middleware: MetricsMiddleware())
+```
+
+### addMiddleware { }
+
+Register multiple middleware using the `MiddlewareFixedTypeBuilder` result builder. This is slightly more efficient than chaining `add(middleware:)` because the stack is fused at compile time:
+
+```swift
+router.addMiddleware {
+    LogRequestsMiddleware()
+    MetricsMiddleware()
+    TracingMiddleware()
+}
+```
+
+The `MiddlewareFixedTypeBuilder` result builder also supports conditionals and arrays:
+
+```swift
+let isDebug = true
+router.addMiddleware {
+    if isDebug {
+        LogRequestsMiddleware()
+    }
+    MetricsMiddleware()
+}
+```
+
+## Middleware ordering and scope
+
+<Warning>Middleware only applies to routes registered **after** the `add(middleware:)` or `addMiddleware { }` call. Routes registered before are unaffected.</Warning>
+
+```swift
+let router = Router()
+
+// Routes added here are NOT covered by AuthMiddleware
+router.get("public") { _, _ in "open to all" }
+
+router.add(middleware: AuthMiddleware())
+
+// Routes added here ARE covered by AuthMiddleware
+router.get("private") { _, _ in "authenticated only" }
+```
+
+### Scoping middleware to a group
+
+Middleware added to a `RouterGroup` applies only to routes in that group:
+
+```swift
+let router = Router()
+
+router.get("health") { _, _ in HTTPResponse.Status.ok }  // no auth
+
+router
+    .group("admin")
+    .add(middleware: AuthMiddleware())   // only for /admin/* routes
+    .get("dashboard") { _, _ in "admin dashboard" }
+    .delete("cache") { _, _ in HTTPResponse.Status.noContent }
+```
+
+The `MiddlewareGroup` inside each `RouterGroup` builds its own independent responder chain — the middleware never leaks into the parent scope.
+
+## MiddlewareFixedTypeBuilder
+
+`MiddlewareFixedTypeBuilder` is the `@resultBuilder` type backing `addMiddleware { }`. It composes multiple `MiddlewareProtocol` values into a single type via `_Middleware2`, `_OptionalMiddleware`, and `_SpreadMiddleware` at compile time, avoiding the overhead of an `[any MiddlewareProtocol]` array at the call site.
+
+```swift
+@resultBuilder
+public enum MiddlewareFixedTypeBuilder<Input, Output, Context> {
+    public static func buildPartialBlock<M0, M1>(
+        accumulated m0: M0,
+        next m1: M1
+    ) -> _Middleware2<M0, M1> { ... }
+
+    public static func buildOptional<M0>(_ component: M0?) -> _OptionalMiddleware<M0> { ... }
+
+    public static func buildArray<M0>(_ components: [M0]) -> _SpreadMiddleware<M0> { ... }
+}
+```
+
+You typically interact with this only through `addMiddleware { }` — you do not instantiate the builder directly.

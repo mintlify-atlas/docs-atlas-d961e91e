@@ -1,0 +1,373 @@
+---
+title: "RouterBuilder"
+description: "A result builder DSL for defining routes declaratively, available in the HummingbirdRouter target."
+---
+
+`HummingbirdRouter` is a built-in target in the Hummingbird package that provides an alternative to the standard `Router`. Instead of registering routes imperatively with method calls, you declare your routing tree as a structured hierarchy using Swift's result builder syntax.
+
+## When to use RouterBuilder
+
+Use `RouterBuilder` when you want:
+
+- A declarative, composable routing tree that reads like a description of your API
+- Controller-style grouping via `RouterController`
+- Per-group context transforms without extra boilerplate
+
+Use the standard `Router` when you prefer a simpler, imperative style or when you want to add routes dynamically at runtime.
+
+## Adding the dependency
+
+`HummingbirdRouter` ships inside the main Hummingbird package. Add the product to your target:
+
+```swift Package.swift
+dependencies: [
+    .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0")
+],
+targets: [
+    .executableTarget(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "Hummingbird", package: "hummingbird"),
+            .product(name: "HummingbirdRouter", package: "hummingbird"),
+        ]
+    )
+]
+```
+
+Then import it alongside `Hummingbird`:
+
+```swift
+import Hummingbird
+import HummingbirdRouter
+```
+
+## RouterBuilder
+
+`RouterBuilder` is the top-level type that replaces `Router`. It is a `MiddlewareProtocol` and also conforms to `HTTPResponderBuilder`, so you can pass it directly to `Application`.
+
+```swift RouterBuilder.swift (source)
+public struct RouterBuilder<Context: RouterRequestContext, Handler: MiddlewareProtocol>: MiddlewareProtocol
+where Handler.Input == Request, Handler.Output == Response, Handler.Context == Context {
+    public init(
+        context: Context.Type = Context.self,
+        options: RouterBuilderOptions = [],
+        @MiddlewareFixedTypeBuilder<Input, Output, Context> builder: () -> Handler
+    )
+}
+```
+
+A minimal application using `RouterBuilder`:
+
+```swift main.swift
+import Hummingbird
+import HummingbirdRouter
+
+let router = RouterBuilder(context: BasicRouterRequestContext.self) {
+    Get("hello") { _, _ in
+        return "Hello, world!"
+    }
+}
+
+let app = Application(
+    router: router,
+    configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+)
+try await app.runService()
+```
+
+### RouterBuilderOptions
+
+Pass options to the initializer to control router behaviour:
+
+| Option | Description |
+|---|---|
+| `caseInsensitive` | Path comparisons are case-insensitive |
+
+```swift
+let router = RouterBuilder(
+    context: BasicRouterRequestContext.self,
+    options: .caseInsensitive
+) {
+    Get("users") { _, _ in fetchAllUsers() }
+}
+```
+
+## Request context
+
+`RouterBuilder` requires a context type that conforms to `RouterRequestContext`. The framework provides `BasicRouterRequestContext` for most use cases:
+
+```swift RouterBuilderContext.swift (source)
+public struct BasicRouterRequestContext: RequestContext, RouterRequestContext {
+    public var routerContext: RouterBuilderContext
+    public var coreContext: CoreRequestContextStorage
+
+    public init(source: Source) {
+        self.coreContext = .init(source: source)
+        self.routerContext = .init()
+    }
+}
+```
+
+Use `BasicRouterRequestContext` unless you need to store additional per-request state in the context.
+
+## Route
+
+`Route` represents a single HTTP route matched by method and path. You construct routes using the free functions `Get`, `Post`, `Put`, `Patch`, `Delete`, and `Head`, which each return a `Route` value:
+
+<Tabs>
+  <Tab title="Closure handler">
+    ```swift
+    Get("users/:id") { request, context -> User in
+        let id = try context.parameters.require("id", as: UUID.self)
+        return try await userRepository.find(id)
+    }
+    ```
+  </Tab>
+  <Tab title="Middleware chain">
+    ```swift
+    Post("users") {
+        MyAuthMiddleware()
+        Handle { request, context -> HTTPResponse.Status in
+            let body = try await request.decode(as: CreateUserRequest.self, context: context)
+            try await userRepository.create(body)
+            return .created
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+All route free functions share the same signature:
+
+```swift Route.swift (source)
+public func Get<RouteOutput: ResponseGenerator, Context: RouterRequestContext>(
+    _ routerPath: RouterPath = "",
+    handler: @escaping @Sendable (Request, Context) async throws -> RouteOutput
+) -> Route<_RouteHandlerClosure<RouteOutput, Context>, Context>
+
+public func Get<M0: MiddlewareProtocol, Context: RouterRequestContext>(
+    _ routerPath: RouterPath = "",
+    @RouteBuilder<Context> builder: () -> M0
+) -> Route<_RouteHandlerMiddleware<M0>, Context>
+```
+
+<Note>
+  Route paths are relative to the group the route is defined in. Use `:paramName` for path parameters and `*` for wildcards.
+</Note>
+
+## RouteGroup
+
+`RouteGroup` applies a shared path prefix — and optionally shared middleware — to a set of routes. Groups can be nested.
+
+```swift RouteGroup.swift (source)
+public struct RouteGroup<Context: RouterRequestContext, Handler: MiddlewareProtocol>: RouterMiddleware
+where Handler.Input == Request, Handler.Output == Response, Handler.Context == Context {
+    public init(
+        _ routerPath: RouterPath,
+        @MiddlewareFixedTypeBuilder<Request, Response, Context> builder: () -> Handler
+    )
+}
+```
+
+Example with nested groups and middleware:
+
+```swift
+RouterBuilder(context: BasicRouterRequestContext.self) {
+    RouteGroup("api/v1") {
+        LogRequestsMiddleware(.info)
+
+        RouteGroup("users") {
+            Get(handler: listUsers)
+            Post(handler: createUser)
+
+            RouteGroup(":id") {
+                Get(handler: getUser)
+                Put(handler: updateUser)
+                Delete(handler: deleteUser)
+            }
+        }
+
+        RouteGroup("products") {
+            Get(handler: listProducts)
+            Post(handler: createProduct)
+        }
+    }
+}
+```
+
+## RouteBuilder and Handle
+
+Inside a route initializer that accepts `@RouteBuilder`, you compose middleware with a terminal `Handle` step. `Handle` wraps a closure and is the only permitted final entry in the chain — the result builder enforces this at compile time.
+
+```swift RouteBuilder.swift (source)
+public struct Handle<HandlerOutput: ResponseGenerator, Context: RouterRequestContext>: Sendable, MiddlewareProtocol {
+    public init(_ handler: @escaping @Sendable (Input, Context) async throws -> HandlerOutput)
+}
+```
+
+```swift
+Post("login") {
+    RateLimitMiddleware(maxRequests: 5)
+    Handle { request, context -> AuthToken in
+        let credentials = try await request.decode(as: Credentials.self, context: context)
+        return try await authService.login(credentials)
+    }
+}
+```
+
+## RouterController
+
+`RouterController` is a protocol for grouping related routes into a reusable, controller-style type. Implement the `body` property using the same result builder as `RouterBuilder`:
+
+```swift RouterController.swift (source)
+public protocol RouterController<Context> {
+    associatedtype Context
+    associatedtype Body: RouterMiddleware<Context>
+    @MiddlewareFixedTypeBuilder<Request, Response, Context> var body: Body { get }
+}
+```
+
+Define a controller:
+
+```swift
+struct UserController: RouterController {
+    typealias Context = BasicRouterRequestContext
+
+    var body: some RouterMiddleware<Context> {
+        RouteGroup("users") {
+            Get(handler: listUsers)
+            Post(handler: createUser)
+            Get(":id", handler: getUser)
+            Put(":id", handler: updateUser)
+            Delete(":id", handler: deleteUser)
+        }
+    }
+}
+```
+
+Use it directly inside `RouterBuilder` — `RouterController` values are valid result builder expressions:
+
+```swift
+let router = RouterBuilder(context: BasicRouterRequestContext.self) {
+    UserController()
+    ProductController()
+}
+```
+
+## ContextTransform
+
+`ContextTransform` lets a `RouteGroup` switch to a different `RequestContext` type for the routes inside it. This is useful when some routes need extra data in their context (for example, an authenticated user).
+
+There are two variants:
+
+<Tabs>
+  <Tab title="ContextTransform (infallible)">
+    Use when constructing the child context cannot fail. The child context's `Source` must be the parent context type.
+
+    ```swift ContextTransform.swift (source)
+    public struct ContextTransform<
+        Context: RouterRequestContext,
+        HandlerContext: RouterRequestContext,
+        Handler: MiddlewareProtocol
+    >: RouterMiddleware
+    where HandlerContext.Source == Context { ... }
+    ```
+
+    ```swift
+    ContextTransform(to: AuthenticatedContext.self) {
+        Get("profile", handler: getProfile)
+    }
+    ```
+  </Tab>
+  <Tab title="ThrowingContextTransform (via RouteGroup)">
+    Use when constructing the child context can throw — for example, when the transform validates authentication. The child context must conform to `ChildRequestContext` and declare its `ParentContext`.
+
+    ```swift ContextTransform.swift (source)
+    public struct ThrowingContextTransform<
+        Context: RouterRequestContext,
+        HandlerContext: RouterRequestContext & ChildRequestContext,
+        Handler: MiddlewareProtocol
+    >: RouterMiddleware
+    where HandlerContext.ParentContext == Context { ... }
+    ```
+
+    Define the child context:
+
+    ```swift
+    struct AuthenticatedContext: ChildRequestContext, RouterRequestContext {
+        typealias ParentContext = BasicRouterRequestContext
+        var coreContext: CoreRequestContextStorage
+        var user: User
+
+        init(context: ParentContext) throws {
+            guard let user = context.identity else {
+                throw HTTPError(.unauthorized)
+            }
+            self.coreContext = .init(source: context)
+            self.user = user
+        }
+    }
+    ```
+
+    Use it via the `RouteGroup` context initializer:
+
+    ```swift
+    RouteGroup("admin", context: AuthenticatedContext.self) {
+        Get("dashboard", handler: getDashboard)
+        Delete("users/:id", handler: deleteUser)
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  `ThrowingContextTransform` is invoked automatically when you pass a `context:` argument to `RouteGroup`. You do not need to instantiate it directly.
+</Note>
+
+## Complete example
+
+```swift main.swift
+import Hummingbird
+import HummingbirdRouter
+
+struct ArticleController: RouterController {
+    typealias Context = BasicRouterRequestContext
+
+    var body: some RouterMiddleware<Context> {
+        RouteGroup("articles") {
+            Get(handler: listArticles)
+            Post {
+                AuthMiddleware()
+                Handle { request, context -> Article in
+                    let input = try await request.decode(as: CreateArticleInput.self, context: context)
+                    return try await articleStore.create(input)
+                }
+            }
+            RouteGroup(":slug") {
+                Get(handler: getArticle)
+                Put {
+                    AuthMiddleware()
+                    Handle(updateArticle)
+                }
+                Delete {
+                    AuthMiddleware()
+                    Handle(deleteArticle)
+                }
+            }
+        }
+    }
+}
+
+let router = RouterBuilder(
+    context: BasicRouterRequestContext.self,
+    options: .caseInsensitive
+) {
+    ArticleController()
+}
+
+let app = Application(
+    router: router,
+    configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+)
+try await app.runService()
+```

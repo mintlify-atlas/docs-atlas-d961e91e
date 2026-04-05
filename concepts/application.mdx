@@ -1,0 +1,256 @@
+---
+title: "Application"
+description: "Learn how to configure and run a Hummingbird application, including server setup, services, and lifecycle hooks."
+---
+
+`Application` is the top-level struct that wires together all components of a Hummingbird server: a responder (typically a `Router`), an HTTP server, configuration, and attached services.
+
+## ApplicationProtocol
+
+Every Hummingbird application conforms to `ApplicationProtocol`, which in turn conforms to `Service` from [ServiceLifecycle](https://github.com/swift-server/swift-service-lifecycle):
+
+```swift
+public protocol ApplicationProtocol: Service
+where Context: InitializableFromSource<ApplicationRequestContextSource> {
+    associatedtype Responder: HTTPResponder
+    typealias Context = Responder.Context
+
+    var responder: Responder { get async throws }
+    var server: HTTPServerBuilder { get }
+    var eventLoopGroup: any EventLoopGroup { get }
+    var configuration: ApplicationConfiguration { get }
+    var logger: Logger { get }
+    var services: [any Service] { get }
+    var processesRunBeforeServerStart: [@Sendable () async throws -> Void] { get }
+
+    @Sendable func onServerRunning(_ channel: any Channel) async
+}
+```
+
+The concrete `Application<Responder>` struct provides a full implementation. You typically construct it with either a `Router` or a prebuilt responder.
+
+## Initializing an application
+
+<Tabs>
+  <Tab title="With a router">
+    Pass a `Router` directly. Hummingbird calls `buildResponder()` automatically:
+
+    ```swift
+    import Hummingbird
+
+    let router = Router()
+    router.get("hello") { _, _ in
+        "Hello, world!"
+    }
+
+    let app = Application(
+        router: router,
+        configuration: ApplicationConfiguration(address: .hostname("127.0.0.1", port: 8080))
+    )
+    try await app.runService()
+    ```
+  </Tab>
+  <Tab title="With a prebuilt responder">
+    Build the responder yourself and pass it in:
+
+    ```swift
+    let router = Router()
+    router.get("ping") { _, _ in HTTPResponse.Status.ok }
+
+    let app = Application(
+        responder: router.buildResponder(),
+        configuration: ApplicationConfiguration(address: .hostname("0.0.0.0", port: 8080))
+    )
+    try await app.runService()
+    ```
+  </Tab>
+</Tabs>
+
+## EventLoopGroupProvider
+
+Control which `EventLoopGroup` powers the server's I/O threads:
+
+```swift
+public enum EventLoopGroupProvider {
+    /// Use one of the singleton EventLoopGroups (recommended default)
+    case singleton
+    /// Bring your own EventLoopGroup
+    case shared(any EventLoopGroup)
+}
+```
+
+<CodeGroup>
+
+```swift Singleton (default)
+let app = Application(
+    router: router,
+    eventLoopGroupProvider: .singleton   // uses MultiThreadedEventLoopGroup.singleton
+)
+```
+
+```swift Shared group
+let elg = MultiThreadedEventLoopGroup(numberOfThreads: 4)
+let app = Application(
+    router: router,
+    eventLoopGroupProvider: .shared(elg)
+)
+```
+
+</CodeGroup>
+
+<Tip>`.singleton` is the right choice for most apps. Use `.shared` when you need to coordinate multiple frameworks on the same thread pool.</Tip>
+
+## ApplicationConfiguration
+
+`ApplicationConfiguration` controls socket and server-level settings:
+
+```swift
+public struct ApplicationConfiguration: Sendable {
+    /// Bind address — defaults to 127.0.0.1:8080
+    public var address: BindAddress
+    /// Value returned in the `Server` response header
+    public var serverName: String?
+    /// Maximum length of the pending-connection queue (default: 256)
+    public var backlog: Int
+    /// Allow rebinding an address already in use (default: true)
+    public var reuseAddress: Bool
+}
+```
+
+Common initialization examples:
+
+```swift
+// Default: 127.0.0.1:8080
+let config = ApplicationConfiguration()
+
+// Custom host and port
+let config = ApplicationConfiguration(
+    address: .hostname("0.0.0.0", port: 9000),
+    serverName: "MyApp",
+    reuseAddress: true
+)
+```
+
+## runService()
+
+`runService()` wraps the application inside a `ServiceGroup` that listens for SIGTERM and SIGINT and triggers a graceful shutdown:
+
+```swift
+public func runService(
+    gracefulShutdownSignals: [UnixSignal] = [.sigterm, .sigint]
+) async throws {
+    let serviceGroup = ServiceGroup(
+        configuration: .init(
+            services: [self],
+            gracefulShutdownSignals: gracefulShutdownSignals,
+            logger: self.logger
+        )
+    )
+    try await serviceGroup.run()
+}
+```
+
+Call it as the last `await` in your `@main` entry point:
+
+```swift
+@main
+struct MyServer {
+    static func main() async throws {
+        let router = Router()
+        // ... add routes ...
+        let app = Application(router: router)
+        try await app.runService()
+    }
+}
+```
+
+## Adding extra services
+
+Attach any `Service`-conforming type (database connection pools, caches, background workers) to the application's internal `ServiceGroup` so they share the same lifecycle:
+
+```swift
+// Single service
+var app = Application(router: router)
+app.addServices(myDatabasePool)
+
+// Multiple services at once
+app.addServices(myCache, myWorker)
+
+// Via the initializer
+let app = Application(
+    router: router,
+    services: [myDatabasePool, myCache]
+)
+```
+
+All attached services start and stop alongside the HTTP server.
+
+## beforeServerStarts()
+
+Use `beforeServerStarts(perform:)` to run async work — such as database migrations — after dependent services have started but before the HTTP server begins accepting requests:
+
+```swift
+var app = Application(router: router, services: [dbPool])
+
+app.beforeServerStarts {
+    // dbPool is running here; server is not yet accepting requests
+    try await runMigrations(dbPool)
+}
+
+try await app.runService()
+```
+
+<Note>Multiple closures registered with `beforeServerStarts` run sequentially in the order they were added.</Note>
+
+## onServerRunning callback
+
+Receive the active `Channel` the moment the server starts listening. This is useful for recording the bound address in tests or logging the effective port when using port `0`:
+
+```swift
+let app = Application(
+    router: router,
+    onServerRunning: { channel in
+        print("Server listening on \(channel.localAddress!)")
+    }
+)
+try await app.runService()
+```
+
+## Complete example
+
+```swift
+import Hummingbird
+import Logging
+
+@main
+struct TodoServer {
+    static func main() async throws {
+        let router = Router()
+
+        router.get("health") { _, _ in
+            HTTPResponse.Status.ok
+        }
+
+        router.group("todos")
+            .get(use: TodoController.list)
+            .post(use: TodoController.create)
+            .get(":id", use: TodoController.get)
+            .delete(":id", use: TodoController.delete)
+
+        var app = Application(
+            router: router,
+            configuration: ApplicationConfiguration(
+                address: .hostname("0.0.0.0", port: 8080),
+                serverName: "TodoServer"
+            ),
+            services: [DatabasePool.shared]
+        )
+
+        app.beforeServerStarts {
+            try await DatabasePool.shared.migrate()
+        }
+
+        try await app.runService()
+    }
+}
+```

@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Hummingbird",
+  "projectType": "framework",
+  "projectName": "Hummingbird",
+  "projectDescription": "A lightweight, flexible HTTP server framework for Swift built on SwiftNIO, offering a minimal-dependency core with a rich middleware and routing system.",
   "theme": "palm",
-  "colors": {
-    "primary": "#fb920b",
-    "light": "#edab71"
-  },
-  "favicon": "https://media.brand.dev/56aeb567-bd84-485e-968f-256a8c4310d5.png",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/hummingbird-project/hummingbird"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/hummingbird-project/hummingbird"
-    }
-  },
+  "primaryColor": "#fb920b",
+  "lightColor": "#edab71",
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -101,5 +89,46 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Trie-based high-performance router with wildcard and parameter support",
+    "Flexible middleware system with composable pipeline",
+    "Custom request context for type-safe per-request data",
+    "Built-in CORS, file serving, logging, metrics, and distributed tracing middleware",
+    "First-class async/await and Swift Concurrency support via SwiftNIO",
+    "TLS and HTTP/2 support via swift-nio-ssl and swift-nio-http2",
+    "Result-builder DSL for declarative route definitions (HummingbirdRouter)",
+    "Graceful shutdown via swift-service-lifecycle integration",
+    "Codable request/response encoding with JSON and URL-encoded form support",
+    "Minimal dependencies — only Apple open-source Swift packages"
+  ],
+  "publicApiSurface": [
+    "Application<Responder>",
+    "ApplicationProtocol",
+    "ApplicationConfiguration",
+    "Router<Context>",
+    "RouterBuilder<Context>",
+    "RouterGroup<Context>",
+    "RouterMethods",
+    "RouterOptions",
+    "RouterMiddleware",
+    "MiddlewareProtocol",
+    "CORSMiddleware",
+    "FileMiddleware",
+    "TracingMiddleware",
+    "MetricsMiddleware",
+    "LogRequestMiddleware",
+    "Request",
+    "Response",
+    "RequestBody",
+    "ResponseBody",
+    "RequestContext",
+    "BasicRequestContext",
+    "HTTPError",
+    "HTTPResponseError",
+    "ResponseGenerator",
+    "EventLoopGroupProvider",
+    "BindAddress",
+    "HTTPServerBuilder"
+  ]
 }

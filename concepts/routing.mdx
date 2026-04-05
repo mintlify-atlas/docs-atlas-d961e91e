@@ -1,0 +1,209 @@
+---
+title: "Routing"
+description: "Understand how Hummingbird's trie-based router dispatches requests, extracts path parameters, and organizes routes into groups."
+---
+
+Hummingbird's `Router<Context>` uses a trie data structure to dispatch incoming requests to the correct handler based on the HTTP method and URL path. It is the most common responder you will pass to `Application`.
+
+## Creating a router
+
+```swift
+import Hummingbird
+
+// Uses BasicRequestContext by default
+let router = Router()
+
+// Explicitly specify a custom context type
+let router = Router(context: MyRequestContext.self)
+```
+
+`Router` conforms to both `RouterMethods` and `HTTPResponderBuilder`. After registering all routes, call `buildResponder()` to produce the immutable responder passed to `Application`.
+
+## HTTP method helpers
+
+`RouterMethods` provides typed helpers for every common HTTP verb:
+
+```swift
+router.get("users") { request, context in
+    // GET /users
+    return "list users"
+}
+
+router.post("users") { request, context in
+    // POST /users
+    return HTTPResponse.Status.created
+}
+
+router.put("users/:id") { request, context in
+    // PUT /users/:id
+    return HTTPResponse.Status.ok
+}
+
+router.patch("users/:id") { request, context in
+    // PATCH /users/:id
+    return HTTPResponse.Status.ok
+}
+
+router.delete("users/:id") { request, context in
+    // DELETE /users/:id
+    return HTTPResponse.Status.noContent
+}
+
+router.head("users") { request, context in
+    // HEAD /users
+    return HTTPResponse.Status.ok
+}
+```
+
+All helpers delegate to the underlying `on(_:method:use:)` method:
+
+```swift
+router.on("users", method: .get) { request, context in
+    return "list users"
+}
+```
+
+## Path parameters
+
+Prefix a path segment with `:` to capture it as a named parameter. Parameters are stored on the context and accessed via `context.parameters`:
+
+```swift
+router.get("users/:id") { request, context in
+    // Safely retrieve the parameter (returns nil if absent)
+    let id = context.parameters.get("id")
+
+    // Retrieve and convert in one step
+    let numericId = context.parameters.get("id", as: Int.self)
+
+    // Throw a 400 Bad Request if the parameter is missing
+    let requiredId = try context.parameters.require("id")
+
+    // Require and convert
+    let userId = try context.parameters.require("id", as: UUID.self)
+
+    return "user \(requiredId)"
+}
+```
+
+`Parameters` is a `FlatDictionary<Substring, Substring>` with typed accessors:
+
+| Method | Behaviour |
+|---|---|
+| `get(_:)` | Returns `String?` |
+| `get(_:as:)` | Returns `T?` via `LosslessStringConvertible` or `RawRepresentable` |
+| `require(_:)` | Returns `String` or throws `HTTPError(.badRequest)` |
+| `require(_:as:)` | Returns `T` or throws `HTTPError(.badRequest)` |
+
+## Wildcard paths
+
+Use `*` to match any single path segment without capturing it:
+
+```swift
+router.get("files/*") { request, context in
+    return "matched a file path"
+}
+```
+
+Use `**` (recursive wildcard) to capture all remaining path segments. The captured value is accessible via `getCatchAll()`:
+
+```swift
+router.get("assets/**") { request, context in
+    let segments = context.parameters.getCatchAll()
+    // e.g. ["images", "logo.png"] for /assets/images/logo.png
+    return segments.joined(separator: "/")
+}
+```
+
+## RouterGroup for path prefixes
+
+`RouterGroup` lets you scope a set of routes under a common path prefix and apply shared middleware without affecting routes outside the group:
+
+```swift
+router
+    .group("api/v1")
+    .get("status") { _, _ in HTTPResponse.Status.ok }        // GET /api/v1/status
+    .group("users")
+        .get(use: UserController.list)                        // GET /api/v1/users
+        .post(use: UserController.create)                     // POST /api/v1/users
+        .get(":id", use: UserController.get)                  // GET /api/v1/users/:id
+        .put(":id", use: UserController.update)               // PUT /api/v1/users/:id
+        .delete(":id", use: UserController.delete)            // DELETE /api/v1/users/:id
+```
+
+Groups are lightweight value types — they forward every `on(_:method:responder:)` call back to the parent router with the prefix prepended.
+
+## RouterOptions
+
+Pass `RouterOptions` when creating the router to enable optional behaviour:
+
+```swift
+// Case-insensitive path matching
+let router = Router(options: .caseInsensitive)
+
+// Automatically generate HEAD endpoints for every registered GET route
+let router = Router(options: .autoGenerateHeadEndpoints)
+
+// Combine options
+let router = Router(options: [.caseInsensitive, .autoGenerateHeadEndpoints])
+```
+
+| Option | Description |
+|---|---|
+| `.caseInsensitive` | Path comparisons ignore case |
+| `.autoGenerateHeadEndpoints` | Creates a matching HEAD route for every GET route |
+
+## ResponseGenerator
+
+Route handlers can return any type conforming to `ResponseGenerator`. The protocol has a single requirement:
+
+```swift
+public protocol ResponseGenerator {
+    func response(from request: Request, context: some RequestContext) throws -> Response
+}
+```
+
+Hummingbird provides built-in conformances for:
+
+<CardGroup cols={2}>
+  <Card title="String / Substring" icon="type">
+    Returns `200 OK` with `text/plain; charset=utf-8`
+  </Card>
+  <Card title="ByteBuffer" icon="database">
+    Returns `200 OK` with `application/octet-stream`
+  </Card>
+  <Card title="HTTPResponse.Status" icon="circle-check">
+    Returns that status with an empty body
+  </Card>
+  <Card title="Response" icon="arrow-right">
+    Returned as-is — full control over status, headers, and body
+  </Card>
+</CardGroup>
+
+`Optional<Wrapped: ResponseGenerator>` is also supported: `nil` produces a `204 No Content` response.
+
+```swift
+router.get("string") { _, _ -> String in "hello" }
+router.get("status") { _, _ -> HTTPResponse.Status in .created }
+router.get("buffer") { _, _ -> ByteBuffer in ByteBuffer(string: "raw bytes") }
+router.get("full") { _, _ -> Response in
+    Response(status: .ok, headers: ["X-Custom": "value"], body: .init(byteBuffer: ByteBuffer(string: "body")))
+}
+router.get("maybe") { _, _ -> String? in nil }  // 204 No Content
+```
+
+## Adding middleware to specific routes
+
+Middleware added to a `RouterGroup` applies only to routes registered within that group. Middleware added to the root router applies to all routes. See [Middleware](/concepts/middleware) for the full scope rules.
+
+```swift
+let router = Router()
+
+// This middleware applies to all routes
+router.add(middleware: LogRequestsMiddleware())
+
+router
+    .group("admin")
+    .add(middleware: AuthenticationMiddleware())  // only for /admin/* routes
+    .get("dashboard") { _, _ in "admin panel" }
+    .delete("users/:id") { _, _ in HTTPResponse.Status.noContent }
+```

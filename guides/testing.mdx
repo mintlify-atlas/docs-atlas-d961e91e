@@ -1,0 +1,287 @@
+---
+title: 'Testing'
+description: 'Write fast, reliable tests for Hummingbird routes using the HummingbirdTesting module.'
+---
+
+The `HummingbirdTesting` module provides three test frameworks, each with different trade-offs between speed and fidelity. All three expose the same `TestClientProtocol` interface so your test assertions are identical regardless of which framework you choose.
+
+## Overview
+
+```swift
+import HummingbirdTesting
+import XCTest
+
+final class MyTests: XCTestCase {
+    func testHello() async throws {
+        let router = Router()
+        router.get("/hello") { _, _ in "hello" }
+        let app = Application(router: router)
+
+        try await app.test(.router) { client in
+            let response = try await client.execute(uri: "/hello", method: .get)
+            XCTAssertEqual(response.status, .ok)
+            XCTAssertEqual(String(buffer: response.body), "hello")
+        }
+    }
+}
+```
+
+## Test frameworks
+
+Choose a framework with the `TestingSetup` value you pass to `app.test(_:)`:
+
+```swift Sources/HummingbirdTesting/Application+Test.swift
+public struct TestingSetup: Sendable {
+    /// Send requests directly to the router — no live server.
+    public static var router: TestingSetup
+
+    /// Spin up a live server, connect with a single-connection HTTP/1 client.
+    public static var live: TestingSetup
+
+    /// Spin up a live server, connect with AsyncHTTPClient.
+    public static func ahc(_ scheme: TestHTTPScheme = .http) -> TestingSetup
+}
+```
+
+<CardGroup cols={3}>
+  <Card title=".router" icon="bolt">
+    Fastest. Bypasses the network stack entirely. Ideal for unit-testing route handlers and middleware logic.
+  </Card>
+  <Card title=".live" icon="server">
+    Starts a real TCP server. Useful for integration tests that need to verify network-level behavior.
+  </Card>
+  <Card title=".ahc(.http)" icon="globe">
+    Live server with AsyncHTTPClient. Supports concurrent requests and HTTP redirects. Use when you need a full HTTP client.
+  </Card>
+</CardGroup>
+
+## app.test()
+
+`ApplicationProtocol` is extended with a `test` method that sets up the chosen framework and passes a client into your closure:
+
+```swift Sources/HummingbirdTesting/Application+Test.swift
+extension ApplicationProtocol {
+    public func test<Value>(
+        _ testingSetup: TestingSetup,
+        _ test: @Sendable (any TestClientProtocol) async throws -> Value
+    ) async throws -> Value
+}
+```
+
+The framework starts (and tears down) any required services automatically around your test closure.
+
+## TestClientProtocol
+
+All three frameworks expose their client as `TestClientProtocol`:
+
+```swift Sources/HummingbirdTesting/ApplicationTester.swift
+public protocol TestClientProtocol: Sendable {
+    func executeRequest(
+        uri: String,
+        method: HTTPRequest.Method,
+        headers: HTTPFields,
+        body: ByteBuffer?
+    ) async throws -> TestResponse
+
+    var port: Int? { get }
+}
+```
+
+The `execute` convenience method wraps `executeRequest` and accepts an optional test callback:
+
+```swift
+@discardableResult
+public func execute<Return>(
+    uri: String,
+    method: HTTPRequest.Method,
+    headers: HTTPFields = [:],
+    body: ByteBuffer? = nil,
+    testCallback: @escaping (TestResponse) async throws -> Return = { $0 }
+) async throws -> Return
+```
+
+### TestResponse
+
+```swift Sources/HummingbirdTesting/ApplicationTester.swift
+public struct TestResponse: Sendable {
+    public var status: HTTPResponse.Status  // shortcut for head.status
+    public var headers: HTTPFields          // shortcut for head.headerFields
+    public let body: ByteBuffer
+    public let trailerHeaders: HTTPFields?
+}
+```
+
+## Writing tests
+
+### GET request
+
+```swift
+try await app.test(.router) { client in
+    let response = try await client.execute(uri: "/users/42", method: .get)
+    XCTAssertEqual(response.status, .ok)
+}
+```
+
+### POST with a JSON body
+
+```swift
+try await app.test(.router) { client in
+    let body = ByteBuffer(string: #"{"name":"Alice","email":"alice@example.com"}"#)
+    let response = try await client.execute(
+        uri: "/users",
+        method: .post,
+        headers: [.contentType: "application/json"],
+        body: body
+    )
+    XCTAssertEqual(response.status, .created)
+}
+```
+
+### Asserting on response body
+
+```swift
+try await app.test(.router) { client in
+    let response = try await client.execute(uri: "/greet", method: .get)
+    let bodyString = String(buffer: response.body)
+    XCTAssertEqual(bodyString, "\"hello world\"")
+}
+```
+
+### Asserting on response headers
+
+```swift
+try await app.test(.router) { client in
+    let response = try await client.execute(uri: "/data", method: .get)
+    XCTAssertEqual(response.headers[.contentType], "application/json; charset=utf-8")
+}
+```
+
+### Using the testCallback shorthand
+
+```swift
+try await app.test(.router) { client in
+    try await client.execute(uri: "/items", method: .get) { response in
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertFalse(response.body.readableBytes == 0)
+    }
+}
+```
+
+## RouterTestFramework
+
+The `.router` framework sends requests directly to the `HTTPResponder` without any networking. It constructs a real `Request` object, runs it through all middleware and handlers, and returns a `TestResponse`.
+
+```swift Sources/HummingbirdTesting/RouterTestFramework.swift
+struct RouterTestFramework<Responder: HTTPResponder>: ApplicationTestFramework
+    where Responder.Context: InitializableFromSource
+```
+
+It also runs any services declared on the application — so database connections or other `ServiceLifecycle` services are active during the test. If there are no services, it skips the service group entirely for maximum speed.
+
+<Tip>
+Use `.router` for the vast majority of your tests. It is significantly faster than `.live` or `.ahc` because there is no TCP overhead.
+</Tip>
+
+## LiveTestFramework
+
+The `.live` framework starts a real server bound to a random port and connects to it with a single-connection `TestClient`:
+
+```swift Sources/HummingbirdTesting/LiveTestFramework.swift
+final class LiveTestFramework<App: ApplicationProtocol>: ApplicationTestFramework
+```
+
+The `TestClient` port is available through `client.port` if you need to construct full URLs. The connection uses `keep-alive` automatically.
+
+## AsyncHTTPClientTestFramework
+
+The `.ahc` framework also starts a live server but uses `AsyncHTTPClient` as the HTTP client, enabling concurrent requests and full HTTP feature support. Pass `.https` to enable TLS in the client:
+
+```swift Sources/HummingbirdTesting/Application+Test.swift
+public enum TestHTTPScheme: String, Sendable {
+    case http
+    case https
+}
+
+// HTTP (default)
+try await app.test(.ahc()) { client in ... }
+
+// HTTPS
+try await app.test(.ahc(.https)) { client in ... }
+```
+
+<Note>
+`AsyncHTTPClientTestFramework` does not support trailer headers.
+</Note>
+
+## Full example
+
+```swift
+import Hummingbird
+import HummingbirdTesting
+import XCTest
+
+struct CreateItem: Codable {
+    let title: String
+}
+
+struct Item: ResponseCodable {
+    let id: String
+    let title: String
+}
+
+final class ItemTests: XCTestCase {
+    func makeApp() -> some ApplicationProtocol {
+        var items: [String: Item] = [:]
+        let router = Router()
+
+        router.post("/items") { request, context -> Item in
+            let body = try await request.decode(as: CreateItem.self, context: context)
+            let item = Item(id: UUID().uuidString, title: body.title)
+            items[item.id] = item
+            return item
+        }
+
+        router.get("/items/:id") { request, context -> Item in
+            let id = try context.parameters.require("id")
+            guard let item = items[id] else {
+                throw HTTPError(.notFound)
+            }
+            return item
+        }
+
+        return Application(router: router)
+    }
+
+    func testCreateAndFetchItem() async throws {
+        try await makeApp().test(.router) { client in
+            // create an item
+            let body = ByteBuffer(string: #"{"title":"Buy milk"}"#)
+            let createResponse = try await client.execute(
+                uri: "/items",
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: body
+            )
+            XCTAssertEqual(createResponse.status, .ok)
+
+            // parse the id from the response
+            let decoder = JSONDecoder()
+            let created = try decoder.decode(Item.self, from: Data(buffer: createResponse.body))
+
+            // fetch the item
+            let fetchResponse = try await client.execute(
+                uri: "/items/\(created.id)",
+                method: .get
+            )
+            XCTAssertEqual(fetchResponse.status, .ok)
+        }
+    }
+
+    func testNotFound() async throws {
+        try await makeApp().test(.router) { client in
+            let response = try await client.execute(uri: "/items/nonexistent", method: .get)
+            XCTAssertEqual(response.status, .notFound)
+        }
+    }
+}
+```

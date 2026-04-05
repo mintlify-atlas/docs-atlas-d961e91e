@@ -1,0 +1,218 @@
+---
+title: 'Encoding and decoding'
+description: 'Decode request bodies and encode responses using Codable types in Hummingbird.'
+---
+
+Hummingbird uses two protocols to handle serialization: `RequestDecoder` for reading request bodies and `ResponseEncoder` for writing response bodies. Both `JSONDecoder` and `JSONEncoder` from Foundation conform to these protocols out of the box, and `URLEncodedFormDecoder` / `URLEncodedFormEncoder` are also supported.
+
+## Core protocols
+
+### RequestDecoder
+
+`RequestDecoder` is responsible for deserializing a Swift type from an incoming request body.
+
+```swift Sources/Hummingbird/Codable/CodableProtocols.swift
+public protocol RequestDecoder {
+    func decode<T: Decodable>(
+        _ type: T.Type,
+        from request: Request,
+        context: some RequestContext
+    ) async throws -> T
+}
+```
+
+### ResponseEncoder
+
+`ResponseEncoder` turns an `Encodable` value into a `Response`, setting the correct `Content-Type` and body.
+
+```swift Sources/Hummingbird/Codable/CodableProtocols.swift
+public protocol ResponseEncoder {
+    func encode(
+        _ value: some Encodable,
+        from request: Request,
+        context: some RequestContext
+    ) throws -> Response
+}
+```
+
+The active encoder and decoder are accessed through the request context via `context.responseEncoder` and `context.requestDecoder`.
+
+## Making types encodable as responses
+
+Conform your type to `ResponseEncodable` (which combines `Encodable` and `ResponseGenerator`) to return it directly from a route handler. The router picks up the context's configured encoder automatically.
+
+```swift
+public protocol ResponseEncodable: Encodable, ResponseGenerator {}
+
+// Arrays and dictionaries with Encodable elements also conform automatically
+extension Array: ResponseEncodable where Element: Encodable {}
+extension Dictionary: ResponseEncodable where Key: Encodable, Value: Encodable {}
+```
+
+For types that need both encoding and decoding, use `ResponseCodable`:
+
+```swift
+public protocol ResponseCodable: ResponseEncodable, Decodable {}
+```
+
+## JSON encoding and decoding
+
+`JSONEncoder` and `JSONDecoder` from Foundation are extended to conform to `ResponseEncoder` and `RequestDecoder` respectively. `JSONEncoder` sets `Content-Type: application/json; charset=utf-8` automatically.
+
+```swift Sources/Hummingbird/Codable/JSON/JSONCoding.swift
+extension JSONEncoder: ResponseEncoder {
+    public func encode(
+        _ value: some Encodable,
+        from request: Request,
+        context: some RequestContext
+    ) throws -> Response {
+        let data = try self.encode(value)
+        let buffer = ByteBuffer(bytes: data)
+        return Response(
+            status: .ok,
+            headers: .defaultHummingbirdHeaders(
+                contentType: "application/json; charset=utf-8",
+                contentLength: data.count
+            ),
+            body: .init(byteBuffer: buffer)
+        )
+    }
+}
+
+extension JSONDecoder: RequestDecoder {
+    public func decode<T: Decodable>(
+        _ type: T.Type,
+        from request: Request,
+        context: some RequestContext
+    ) async throws -> T {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        return try self.decodeByteBuffer(T.self, from: buffer)
+    }
+}
+```
+
+### Full JSON route example
+
+```swift
+import Hummingbird
+import Foundation
+
+struct CreateUserRequest: Decodable {
+    let name: String
+    let email: String
+}
+
+struct UserResponse: ResponseEncodable {
+    let id: String
+    let name: String
+    let email: String
+}
+
+let router = Router()
+
+router.post("/users") { request, context -> UserResponse in
+    let body = try await request.decode(as: CreateUserRequest.self, context: context)
+    return UserResponse(id: UUID().uuidString, name: body.name, email: body.email)
+}
+
+let app = Application(
+    router: router,
+    configuration: .init(address: .hostname("127.0.0.1", port: 8080))
+)
+```
+
+<Note>
+The `request.decode(as:context:)` helper uses the decoder stored on the request context. Configure it when building your `Application` to use `JSONDecoder`, `URLEncodedFormDecoder`, or a custom decoder.
+</Note>
+
+## URL-encoded form decoding
+
+`URLEncodedFormDecoder` and `URLEncodedFormEncoder` also conform to `RequestDecoder` and `ResponseEncoder`. The encoder sets `Content-Type: application/x-www-form-urlencoded`.
+
+```swift Sources/Hummingbird/Codable/URLEncodedForm/URLEncodedForm+Request.swift
+extension URLEncodedFormDecoder: RequestDecoder {
+    public func decode<T: Decodable>(
+        _ type: T.Type,
+        from request: Request,
+        context: some RequestContext
+    ) async throws -> T {
+        let buffer = try await request.body.collect(upTo: context.maxUploadSize)
+        let string = String(buffer: buffer)
+        return try self.decode(T.self, from: string)
+    }
+}
+
+extension URLEncodedFormEncoder: ResponseEncoder {
+    public func encode(
+        _ value: some Encodable,
+        from request: Request,
+        context: some RequestContext
+    ) throws -> Response {
+        let string = try self.encode(value)
+        let buffer = ByteBuffer(string: string)
+        return Response(
+            status: .ok,
+            headers: .defaultHummingbirdHeaders(
+                contentType: "application/x-www-form-urlencoded",
+                contentLength: buffer.readableBytes
+            ),
+            body: .init(byteBuffer: buffer)
+        )
+    }
+}
+```
+
+`URLEncodedFormDecoder` supports several date decoding strategies:
+
+```swift
+let decoder = URLEncodedFormDecoder(
+    dateDecodingStrategy: .iso8601
+)
+```
+
+<AccordionGroup>
+  <Accordion title="Date decoding strategies">
+    | Strategy | Description |
+    |---|---|
+    | `.deferredToDate` | Default — defers to `Date`'s own decoding |
+    | `.secondsSince1970` | Numeric seconds since epoch |
+    | `.millisecondsSince1970` | Numeric milliseconds since epoch |
+    | `.iso8601` | ISO 8601 / RFC 3339 formatted string |
+    | `.formatted(DateFormatter)` | Custom `DateFormatter` instance |
+    | `.custom(closure)` | Fully custom decoding closure |
+  </Accordion>
+</AccordionGroup>
+
+## Choosing a decoder per request context
+
+You configure the encoder and decoder on the request context. A common pattern is to create a custom context that holds the codec you need:
+
+<Tabs>
+  <Tab title="JSON (default)">
+    ```swift
+    // JSONDecoder / JSONEncoder are the common defaults.
+    // Many Hummingbird examples use BasicRequestContext which is pre-wired to JSON.
+    let app = Application(router: router)
+    ```
+  </Tab>
+  <Tab title="URL-encoded forms">
+    ```swift
+    struct FormRequestContext: RequestContext {
+        var requestDecoder: some RequestDecoder { URLEncodedFormDecoder() }
+        var responseEncoder: some ResponseEncoder { URLEncodedFormEncoder() }
+        // ... other required context properties
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Setting Content-Type headers
+
+Both built-in encoders set `Content-Type` automatically:
+
+| Encoder | Content-Type |
+|---|---|
+| `JSONEncoder` | `application/json; charset=utf-8` |
+| `URLEncodedFormEncoder` | `application/x-www-form-urlencoded` |
+
+If you implement a custom `ResponseEncoder`, set the header inside your `encode` implementation using `HTTPFields.defaultHummingbirdHeaders(contentType:contentLength:)`.

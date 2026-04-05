@@ -1,0 +1,233 @@
+---
+title: Application
+description: The top-level struct that wires together a responder, server channel, and services into a runnable process.
+---
+
+`Application<Responder>` is the entry point for a Hummingbird server. It conforms to `ApplicationProtocol` and `Service` from [ServiceLifecycle](https://github.com/swift-server/swift-service-lifecycle), so it can be composed into larger service groups or run directly.
+
+```swift
+public struct Application<Responder: HTTPResponder>: ApplicationProtocol
+where Responder.Context: InitializableFromSource<ApplicationRequestContextSource>
+```
+
+**Availability:** macOS 14, iOS 17, tvOS 17 and later.
+
+---
+
+## Initializers
+
+### init(responder:...)
+
+Creates an application from a pre-built responder.
+
+```swift
+public init(
+    responder: Responder,
+    server: HTTPServerBuilder = .http1(),
+    configuration: ApplicationConfiguration = ApplicationConfiguration(),
+    services: [any Service] = [],
+    onServerRunning: @escaping @Sendable (any Channel) async -> Void = { _ in },
+    eventLoopGroupProvider: EventLoopGroupProvider = .singleton,
+    logger: Logger? = nil
+)
+```
+
+<ParamField path="responder" type="Responder" required>
+  The HTTP responder that handles every incoming request. Must be a type conforming to `HTTPResponder` whose `Context` is initializable from `ApplicationRequestContextSource`.
+</ParamField>
+
+<ParamField path="server" type="HTTPServerBuilder" default=".http1()">
+  Configures the server transport layer. Built-in options include `.http1()` and `.http1(configuration:)`. Defaults to a plain HTTP/1.1 channel.
+</ParamField>
+
+<ParamField path="configuration" type="ApplicationConfiguration" default="ApplicationConfiguration()">
+  Bind address, server name, backlog, and other server-level settings. See [ApplicationConfiguration](/api/application-configuration).
+</ParamField>
+
+<ParamField path="services" type="[any Service]" default="[]">
+  Additional `ServiceLifecycle` services to manage alongside the HTTP server. They are started before the server and stopped on graceful shutdown.
+</ParamField>
+
+<ParamField path="onServerRunning" type="@Sendable (any Channel) async -> Void" default="{ _ in }">
+  A closure called once the server channel is active. Receives the bound `Channel`. Useful for logging the listening address or signalling readiness.
+</ParamField>
+
+<ParamField path="eventLoopGroupProvider" type="EventLoopGroupProvider" default=".singleton">
+  Controls where the `EventLoopGroup` comes from. Use `.singleton` to share the process-wide group or `.shared(group)` to supply your own.
+</ParamField>
+
+<ParamField path="logger" type="Logger?" default="nil">
+  Logger the application uses. When `nil`, a logger is created whose label is the `serverName` from `configuration`, falling back to `"Hummingbird"`. The `LOG_LEVEL` environment variable overrides the log level.
+</ParamField>
+
+---
+
+### init(router:...)
+
+Convenience initializer that calls `buildResponder()` on any `HTTPResponderBuilder` (such as `Router` or `RouterBuilder`) before constructing the application.
+
+```swift
+public init<ResponderBuilder: HTTPResponderBuilder>(
+    router: ResponderBuilder,
+    server: HTTPServerBuilder = .http1(),
+    configuration: ApplicationConfiguration = ApplicationConfiguration(),
+    services: [any Service] = [],
+    onServerRunning: @escaping @Sendable (any Channel) async -> Void = { _ in },
+    eventLoopGroupProvider: EventLoopGroupProvider = .singleton,
+    logger: Logger? = nil
+) where Responder == ResponderBuilder.Responder
+```
+
+<ParamField path="router" type="ResponderBuilder" required>
+  Any type conforming to `HTTPResponderBuilder`. `Router<Context>` and `RouterBuilder<Context, Handler>` both conform. `buildResponder()` is called immediately during initialization.
+</ParamField>
+
+All other parameters are identical to `init(responder:...)` above.
+
+---
+
+## Methods
+
+### addServices(_:)
+
+Appends one or more services to the application's internal service group.
+
+```swift
+public mutating func addServices(_ services: any Service...)
+public mutating func addServices(_ services: some Sequence<any Service>)
+```
+
+Services added here are managed alongside the HTTP server: they start before the server accepts connections and stop during graceful shutdown.
+
+---
+
+### beforeServerStarts(perform:)
+
+Schedules a closure to run after other services have started but before the HTTP server begins accepting connections.
+
+```swift
+public mutating func beforeServerStarts(
+    perform process: @escaping @Sendable () async throws -> Void
+)
+```
+
+<ParamField path="process" type="@Sendable () async throws -> Void" required>
+  An async closure. Multiple closures are run in registration order. A thrown error terminates startup. Typical uses include database migrations and cache warming.
+</ParamField>
+
+---
+
+### runService(gracefulShutdownSignals:)
+
+Wraps the application in a `ServiceGroup` and runs it, handling the given Unix signals for graceful shutdown.
+
+```swift
+public func runService(
+    gracefulShutdownSignals: [UnixSignal] = [.sigterm, .sigint]
+) async throws
+```
+
+<ParamField path="gracefulShutdownSignals" type="[UnixSignal]" default="[.sigterm, .sigint]">
+  Signals that trigger a graceful shutdown sequence. Defaults to `SIGTERM` and `SIGINT` (Ctrl-C).
+</ParamField>
+
+<Note>
+  `runService()` is the recommended way to run an application as a standalone process. It creates its own `ServiceGroup`; do not call it if you are composing the application into an existing group.
+</Note>
+
+---
+
+### run()
+
+The `Service` protocol entry point. Called automatically when the application is managed by an external `ServiceGroup`. Prefer `runService()` for standalone processes.
+
+```swift
+public func run() async throws
+```
+
+---
+
+## EventLoopGroupProvider
+
+Controls where the application obtains its `EventLoopGroup`.
+
+```swift
+public enum EventLoopGroupProvider {
+    case singleton
+    case shared(any EventLoopGroup)
+}
+```
+
+<ResponseField name="singleton" type="case">
+  Uses the process-wide singleton `EventLoopGroup`. On Apple platforms this is `NIOTSEventLoopGroup.singleton`; elsewhere it is `MultiThreadedEventLoopGroup.singleton`. Appropriate for most applications.
+</ResponseField>
+
+<ResponseField name="shared(any EventLoopGroup)" type="case">
+  Uses the provided `EventLoopGroup`. Use this when the group is managed externally, for example in tests or when sharing a group across multiple servers.
+</ResponseField>
+
+---
+
+## ApplicationProtocol
+
+`Application` conforms to `ApplicationProtocol`, which defines the contract for custom application types.
+
+```swift
+@available(macOS 14, iOS 17, tvOS 17, *)
+public protocol ApplicationProtocol: Service
+where Context: InitializableFromSource<ApplicationRequestContextSource> {
+    associatedtype Responder: HTTPResponder
+    typealias Context = Responder.Context
+
+    var responder: Responder { get async throws }
+    var server: HTTPServerBuilder { get }
+    var eventLoopGroup: any EventLoopGroup { get }
+    var configuration: ApplicationConfiguration { get }
+    var logger: Logger { get }
+    var services: [any Service] { get }
+    var processesRunBeforeServerStart: [@Sendable () async throws -> Void] { get }
+
+    @Sendable func onServerRunning(_ channel: any Channel) async
+}
+```
+
+Default implementations are provided for every property except `responder`. Override only what your application needs to customize.
+
+---
+
+## Full example
+
+```swift
+import Hummingbird
+import Logging
+
+@main
+struct MyApp {
+    static func main() async throws {
+        let router = Router()
+
+        router.get("health") { _, _ in
+            return "ok"
+        }
+
+        router.get("users/:id") { request, context -> String in
+            let id = try context.parameters.require("id")
+            return "User \(id)"
+        }
+
+        var app = Application(
+            router: router,
+            configuration: .init(
+                address: .hostname("0.0.0.0", port: 8080),
+                serverName: "MyApp"
+            )
+        )
+
+        app.beforeServerStarts {
+            // run migrations, warm caches, etc.
+        }
+
+        try await app.runService()
+    }
+}
+```

@@ -1,0 +1,164 @@
+---
+title: RouterBuilder (result builder DSL)
+description: Declarative result-builder DSL for defining routes, available in the HummingbirdRouter target.
+---
+
+`RouterBuilder` is a result-builder–based alternative to the imperative `Router` API. Import `HummingbirdRouter` to use it.
+
+<Note>
+  `RouterBuilder` is part of the `HummingbirdRouter` library target. Add it to your target dependencies separately from `Hummingbird`.
+</Note>
+
+## RouterBuilder
+
+```swift
+public struct RouterBuilder<Context: RouterRequestContext, Handler: MiddlewareProtocol>: MiddlewareProtocol
+where Handler.Input == Request, Handler.Output == Response, Handler.Context == Context
+```
+
+Conforms to both `HTTPResponder` and `HTTPResponderBuilder`, so it can be passed directly to `Application(router:)`.
+
+### Initializer
+
+```swift
+public init(
+    context: Context.Type = Context.self,
+    options: RouterBuilderOptions = [],
+    @MiddlewareFixedTypeBuilder<Input, Output, Context> builder: () -> Handler
+)
+```
+
+<ParamField path="context" type="Context.Type" default="Context.self">
+  The request context type. Defaults to the inferred generic parameter.
+</ParamField>
+<ParamField path="options" type="RouterBuilderOptions" default="[]">
+  Router options such as `.caseInsensitive`.
+</ParamField>
+<ParamField path="builder" type="@MiddlewareFixedTypeBuilder result builder">
+  A result builder closure containing `Route`, `RouteGroup`, middleware, and other `MiddlewareProtocol`-conforming values.
+</ParamField>
+
+### RouterBuilderOptions
+
+```swift
+public struct RouterBuilderOptions: OptionSet, Sendable {
+    public static var caseInsensitive: Self
+}
+```
+
+| Option | Description |
+|---|---|
+| `.caseInsensitive` | Route path comparisons ignore case |
+
+## Route
+
+`Route` represents a single HTTP endpoint:
+
+```swift
+public struct Route<Handler, Context: RouterRequestContext>: RouterMiddleware
+```
+
+### Free functions (recommended)
+
+The idiomatic way to define routes inside a `RouterBuilder` is the set of top-level free functions:
+
+```swift
+Get(_ routerPath: RouterPath = "", handler: @escaping @Sendable (Request, Context) async throws -> some ResponseGenerator)
+Post(_ routerPath: RouterPath = "", handler: ...)
+Put(_ routerPath: RouterPath = "", handler: ...)
+Patch(_ routerPath: RouterPath = "", handler: ...)
+Delete(_ routerPath: RouterPath = "", handler: ...)
+Head(_ routerPath: RouterPath = "", handler: ...)
+```
+
+Each also has a `@RouteBuilder`-based overload that accepts a middleware pipeline instead of a plain closure.
+
+### Example
+
+```swift
+import HummingbirdRouter
+
+let router = RouterBuilder(context: BasicRouterRequestContext.self) {
+    Get("health") { _, _ in
+        HTTPResponse.Status.ok
+    }
+    Post("users") { request, context -> Response in
+        let body = try await request.decode(as: CreateUserRequest.self, context: context)
+        // create user...
+        return Response(status: .created)
+    }
+    RouteGroup("users/:id") {
+        Get { request, context -> UserResponse in
+            let id = try context.parameters.require("id")
+            // fetch user...
+            return UserResponse(id: id)
+        }
+        Delete { _, context -> HTTPResponse.Status in
+            let id = try context.parameters.require("id")
+            // delete user...
+            return .noContent
+        }
+    }
+}
+
+let app = Application(router: router)
+try await app.runService()
+```
+
+## RouteGroup
+
+`RouteGroup` nests routes under a shared path prefix and can scope middleware:
+
+```swift
+RouteGroup("prefix") {
+    // routes and middleware here
+}
+```
+
+Context-transforming groups are also supported:
+
+```swift
+RouteGroup("admin", context: AdminRequestContext.self) {
+    Get("dashboard") { _, _ in ... }
+}
+```
+
+## RouterController
+
+`RouterController` is a protocol for organising related routes into a reusable type:
+
+```swift
+public protocol RouterController<Context> {
+    associatedtype Context: RouterRequestContext
+    @MiddlewareFixedTypeBuilder<Request, Response, Context> var body: Body { get }
+}
+```
+
+Implement it to group related route definitions:
+
+```swift
+struct UserController: RouterController {
+    typealias Context = BasicRouterRequestContext
+
+    var body: some MiddlewareProtocol<Request, Response, Context> {
+        RouteGroup("users") {
+            Get(handler: list)
+            Post(handler: create)
+            RouteGroup(":id") {
+                Get(handler: show)
+                Delete(handler: delete)
+            }
+        }
+    }
+
+    func list(_ request: Request, _ context: Context) async throws -> [UserResponse] { ... }
+    func create(_ request: Request, _ context: Context) async throws -> UserResponse { ... }
+    func show(_ request: Request, _ context: Context) async throws -> UserResponse { ... }
+    func delete(_ request: Request, _ context: Context) async throws -> HTTPResponse.Status { ... }
+}
+
+// Use inside RouterBuilder:
+let router = RouterBuilder(context: BasicRouterRequestContext.self) {
+    UserController()
+}
+```

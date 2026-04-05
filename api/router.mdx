@@ -1,0 +1,224 @@
+---
+title: Router
+description: Trie-based HTTP router that matches requests by path and method and applies per-route middleware.
+---
+
+`Router<Context>` collects route definitions and middleware, then compiles them into a `RouterResponder` that is passed to `Application`. It conforms to both `RouterMethods` (giving access to `get`, `post`, etc.) and `HTTPResponderBuilder` (so it can be passed directly to `Application(router:)`).
+
+```swift
+@available(macOS 14, iOS 17, tvOS 17, *)
+public final class Router<Context: RequestContext>: RouterMethods, HTTPResponderBuilder
+```
+
+---
+
+## Type parameters
+
+<ResponseField name="Context" type="RequestContext">
+  The request context type threaded through every handler and middleware. Must conform to `RequestContext`. Use `BasicRequestContext` for standard applications.
+</ResponseField>
+
+---
+
+## Initializer
+
+```swift
+public init(context: Context.Type = BasicRequestContext.self, options: RouterOptions = [])
+```
+
+<ParamField path="context" type="Context.Type" default="BasicRequestContext.self">
+  Specifies the request context type at the call site for type inference. Passing the type explicitly is only necessary when `Context` cannot be inferred.
+</ParamField>
+
+<ParamField path="options" type="RouterOptions" default="[]">
+  Option set that changes routing behaviour. See [RouterOptions](#routeroptions) below.
+</ParamField>
+
+```swift
+// Default context
+let router = Router()
+
+// Custom context
+let router = Router(context: MyRequestContext.self, options: .caseInsensitive)
+```
+
+---
+
+## RouterOptions
+
+`RouterOptions` is an `OptionSet` that modifies how the router matches paths.
+
+```swift
+public struct RouterOptions: OptionSet, Sendable {
+    public static var caseInsensitive: Self
+    public static var autoGenerateHeadEndpoints: Self
+}
+```
+
+<ResponseField name="caseInsensitive" type="RouterOptions">
+  Path matching ignores case. All registered paths and incoming request paths are lowercased before comparison.
+</ResponseField>
+
+<ResponseField name="autoGenerateHeadEndpoints" type="RouterOptions">
+  For every `GET` endpoint that has no explicit `HEAD` handler, the router automatically generates a `HEAD` handler that runs the `GET` handler and strips the body from the response.
+</ResponseField>
+
+---
+
+## Core method: on(_:method:responder:)
+
+Registers a typed responder for a path and HTTP method combination.
+
+```swift
+@discardableResult
+public func on<Responder: HTTPResponder>(
+    _ path: RouterPath,
+    method: HTTPRequest.Method,
+    responder: Responder
+) -> Self where Responder.Context == Context
+```
+
+<ParamField path="path" type="RouterPath" required>
+  The route path. Accepts string literals. See [RouterPath syntax](/api/router-methods#routerpath-syntax).
+</ParamField>
+
+<ParamField path="method" type="HTTPRequest.Method" required>
+  The HTTP method to match, for example `.get`, `.post`, `.delete`.
+</ParamField>
+
+<ParamField path="responder" type="Responder" required>
+  Any value conforming to `HTTPResponder` with a matching `Context`. The router wraps this in the current middleware stack before storing it.
+</ParamField>
+
+---
+
+## Closure variant: on(_:method:use:)
+
+Registers a closure handler. The closure is automatically wrapped in a `CallbackResponder`.
+
+```swift
+@discardableResult
+public func on(
+    _ path: RouterPath,
+    method: HTTPRequest.Method,
+    use closure: @Sendable @escaping (Request, Context) async throws -> some ResponseGenerator
+) -> Self
+```
+
+<ParamField path="path" type="RouterPath" required>
+  Route path. Supports parameters (`:id`), wildcards (`*`, `**`), and fixed segments.
+</ParamField>
+
+<ParamField path="method" type="HTTPRequest.Method" required>
+  HTTP method to match.
+</ParamField>
+
+<ParamField path="use closure" type="(Request, Context) async throws -> some ResponseGenerator" required>
+  Async handler closure. The return value must conform to `ResponseGenerator`. `String`, `HTTPResponse.Status`, `Response`, and `Codable` types via `JSONEncoder` all qualify.
+</ParamField>
+
+---
+
+## add(middleware:)
+
+Adds a middleware to the router's global middleware chain. Middleware added here applies to every route registered **after** this call.
+
+```swift
+@discardableResult
+public func add(middleware: any MiddlewareProtocol<Request, Response, Context>) -> Self
+```
+
+<ParamField path="middleware" type="any MiddlewareProtocol<Request, Response, Context>" required>
+  The middleware to append. Middleware is applied in registration order.
+</ParamField>
+
+<Note>
+  Middleware only applies to routes added **after** the `add(middleware:)` call. Routes added before are unaffected.
+</Note>
+
+---
+
+## addMiddleware(_:) result builder
+
+Adds multiple middleware at once using the `MiddlewareFixedTypeBuilder` result builder. Prefer this over sequential `add(middleware:)` calls for a slight performance benefit.
+
+```swift
+@discardableResult
+public func addMiddleware(
+    @MiddlewareFixedTypeBuilder<Request, Response, Context> buildMiddlewareStack: () -> some MiddlewareProtocol<Request, Response, Context>
+) -> Self
+```
+
+```swift
+router.addMiddleware {
+    LogRequestsMiddleware(.info)
+    MetricsMiddleware()
+    CORSMiddleware()
+}
+```
+
+---
+
+## buildResponder()
+
+Compiles all registered routes and middleware into a `RouterResponder<Context>`. Called automatically by `Application(router:)`.
+
+```swift
+public func buildResponder() -> RouterResponder<Context>
+```
+
+In `DEBUG` builds the router validates the route table and calls `assertionFailure` if it detects duplicates or other issues. In `RELEASE` builds validation is skipped.
+
+---
+
+## HTTPResponderBuilder conformance
+
+`Router` conforms to `HTTPResponderBuilder`, so it can be passed directly to `Application`:
+
+```swift
+public protocol HTTPResponderBuilder {
+    associatedtype Responder: HTTPResponder
+    func buildResponder() -> Responder
+}
+```
+
+---
+
+## Full example
+
+```swift
+import Hummingbird
+
+let router = Router(options: .autoGenerateHeadEndpoints)
+
+// Global middleware
+router.addMiddleware {
+    LogRequestsMiddleware(.info)
+}
+
+// Simple route
+router.get("health") { _, _ in
+    HTTPResponse.Status.ok
+}
+
+// Route with path parameter
+router.get("users/:id") { _, context -> String in
+    let id = try context.parameters.require("id")
+    return "User: \(id)"
+}
+
+// Grouped routes
+router.group("api/v1")
+    .post("users") { request, context -> HTTPResponse.Status in
+        // create user
+        return .created
+    }
+    .delete("users/:id") { _, context -> HTTPResponse.Status in
+        let id = try context.parameters.require("id")
+        // delete user
+        return .noContent
+    }
+
+let app = Application(router: router)
+try await app.runService()
+```
